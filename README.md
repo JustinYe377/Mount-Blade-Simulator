@@ -56,3 +56,4 @@ Just open `index.html` in a browser — no build step required.
 - [ROADMAP.md](docs/ROADMAP.md) — milestone plan
 - [SYSTEMS.md](docs/SYSTEMS.md) — technical notes per system
 - [BALANCE.md](docs/BALANCE.md) — troop stats and economy tuning
+
