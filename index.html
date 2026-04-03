@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Warbands — 2D Mount & Blade</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.60.0/phaser.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+  #game-container { width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<div id="game-container"></div>
+<script>
+// ============================================================
+//  WARBANDS v2 — Procedural World + A* Pathfinding + Threat AI
+// ============================================================
+
+// ---- Perlin Noise (compact implementation) ----
+const Noise = (() => {
+  const perm = new Uint8Array(512);
+  const grad3 = [[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],[0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]];
+  function seed(s) {
+    const p = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) p[i] = i;
+    for (let i = 255; i > 0; i--) {
+      s = (s * 16807 + 0) % 2147483647;
+      const j = s % (i + 1);
+      [p[i], p[j]] = [p[j], p[i]];
+    }
+    for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+  }
+  function dot(g, x, y) { return g[0]*x + g[1]*y; }
+  function noise2d(x, y) {
+    const F2 = 0.5*(Math.sqrt(3)-1), G2 = (3-Math.sqrt(3))/6;
+    const s = (x+y)*F2;
+    const i = Math.floor(x+s), j = Math.floor(y+s);
+    const t = (i+j)*G2;
+    const X0 = i-t, Y0 = j-t;
+    const x0 = x-X0, y0 = y-Y0;
+    const i1 = x0>y0?1:0, j1 = x0>y0?0:1;
+    const x1 = x0-i1+G2, y1 = y0-j1+G2;
+    const x2 = x0-1+2*G2, y2 = y0-1+2*G2;
+    const ii = i&255, jj = j&255;
+    const gi0 = perm[ii+perm[jj]]%12;
+    const gi1 = perm[ii+i1+perm[jj+j1]]%12;
+    const gi2 = perm[ii+1+perm[jj+1]]%12;
+    let n0=0,n1=0,n2=0;
+    let t0 = 0.5-x0*x0-y0*y0;
+    if(t0>0){t0*=t0;n0=t0*t0*dot(grad3[gi0],x0,y0);}
+    let t1 = 0.5-x1*x1-y1*y1;
+    if(t1>0){t1*=t1;n1=t1*t1*dot(grad3[gi1],x1,y1);}
+    let t2 = 0.5-x2*x2-y2*y2;
+    if(t2>0){t2*=t2;n2=t2*t2*dot(grad3[gi2],x2,y2);}
+    return 70*(n0+n1+n2);
+  }
+  function fbm(x, y, octaves=4) {
+    let val=0, amp=1, freq=1, max=0;
+    for(let i=0;i<octaves;i++){val+=noise2d(x*freq,y*freq)*amp;max+=amp;amp*=0.5;freq*=2;}
+    return val/max;
+  }
+  seed(42);
+  return { seed, fbm, noise2d };
+})();
+
+// ---- A* Pathfinder (grid-based, with threat cost) ----
+class AStar {
+  constructor(grid, w, h) {
+    this.grid = grid; this.w = w; this.h = h;
+  }
+  findPath(sx, sy, ex, ey, threatMap=null) {
+    const w = this.w, h = this.h;
+    sx = clamp(sx,0,w-1); sy = clamp(sy,0,h-1);
+    ex = clamp(ex,0,w-1); ey = clamp(ey,0,h-1);
+    if (this.grid[sy*w+sx] >= 999 || this.grid[ey*w+ex] >= 999) return null;
+
+    const open = new MinHeap();
+    const gScore = new Float32Array(w*h).fill(Infinity);
+    const fScore = new Float32Array(w*h).fill(Infinity);
+    const cameFrom = new Int32Array(w*h).fill(-1);
+    const closed = new Uint8Array(w*h);
+
+    const si = sy*w+sx;
+    gScore[si] = 0;
+    fScore[si] = this.heuristic(sx,sy,ex,ey);
+    open.push(si, fScore[si]);
+
+    const dirs = [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]];
+    let steps = 0;
+    const maxSteps = 8000;
+
+    while(open.size()>0 && steps++ < maxSteps) {
+      const ci = open.pop();
+      const cx = ci%w, cy = (ci/w)|0;
+      if(cx===ex && cy===ey) return this.reconstruct(cameFrom,ci,w);
+      if(closed[ci]) continue;
+      closed[ci] = 1;
+
+      for(const [dx,dy] of dirs) {
+        const nx=cx+dx, ny=cy+dy;
+        if(nx<0||nx>=w||ny<0||ny>=h) continue;
+        const ni = ny*w+nx;
+        if(closed[ni]) continue;
+        const tileCost = this.grid[ni];
+        if(tileCost >= 999) continue;
+        const isDiag = dx!==0&&dy!==0;
+        let moveCost = isDiag ? tileCost*1.414 : tileCost;
+        if(threatMap) moveCost += (threatMap[ni] || 0);
+        const tg = gScore[ci] + moveCost;
+        if(tg < gScore[ni]) {
+          cameFrom[ni] = ci;
+          gScore[ni] = tg;
+          fScore[ni] = tg + this.heuristic(nx,ny,ex,ey);
+          open.push(ni, fScore[ni]);
+        }
+      }
+    }
+    return null;
+  }
+  heuristic(ax,ay,bx,by) {
+    const dx=Math.abs(ax-bx), dy=Math.abs(ay-by);
+    return (dx+dy) + (1.414-2)*Math.min(dx,dy);
+  }
+  reconstruct(cameFrom,ci,w) {
+    const path = [];
+    while(ci!==-1) { path.unshift({x:ci%w,y:(ci/w)|0}); ci=cameFrom[ci]; }
+    if(path.length>6) {
+      const simplified = [path[0]];
+      for(let i=3;i<path.length-1;i+=3) simplified.push(path[i]);
+      simplified.push(path[path.length-1]);
+      return simplified;
+    }
+    return path;
+  }
+}
+
+// ---- Min Heap ----
+class MinHeap {
+  constructor(){this.data=[];}
+  size(){return this.data.length;}
+  push(val,pri){this.data.push({val,pri});this._up(this.data.length-1);}
+  pop(){const top=this.data[0];const last=this.data.pop();if(this.data.length>0){this.data[0]=last;this._down(0);}return top.val;}
+  _up(i){while(i>0){const p=(i-1)>>1;if(this.data[i].pri<this.data[p].pri){[this.data[i],this.data[p]]=[this.data[p],this.data[i]];i=p;}else break;}}
+  _down(i){const n=this.data.length;while(true){let s=i;const l=2*i+1,r=2*i+2;if(l<n&&this.data[l].pri<this.data[s].pri)s=l;if(r<n&&this.data[r].pri<this.data[s].pri)s=r;if(s!==i){[this.data[i],this.data[s]]=[this.data[s],this.data[i]];i=s;}else break;}}
+}
+
+// ---- CONSTANTS ----
+const TILE = 8;
+const GRID_W = 240, GRID_H = 180;
+const MAP_W = GRID_W * TILE, MAP_H = GRID_H * TILE;
+
+const TERRAIN = {
+  DEEP_WATER:  { id:0, color:0x1a3a6a, cost:999,  name:'Deep Water' },
+  WATER:       { id:1, color:0x2a5a9a, cost:999,  name:'Water' },
+  SAND:        { id:2, color:0xd4c07a, cost:1.3,  name:'Sand' },
+  GRASS:       { id:3, color:0x4a8a3a, cost:1.0,  name:'Grassland' },
+  FOREST:      { id:4, color:0x2a6a2a, cost:1.8,  name:'Forest' },
+  DENSE_FOREST:{ id:5, color:0x1a4a1a, cost:2.5,  name:'Dense Forest' },
+  HILLS:       { id:6, color:0x8a7a4a, cost:2.0,  name:'Hills' },
+  MOUNTAIN:    { id:7, color:0x6a6a6a, cost:999,  name:'Mountain' },
+  SNOW:        { id:8, color:0xddeeff, cost:3.0,  name:'Snow' },
+};
+const TERRAIN_BY_ID = Object.values(TERRAIN);
+
+const FACTION_COLORS = { Kingdom:0x4488ff, Empire:0xee4444, Rebels:0x44cc44, Bandit:0x998844 };
+const TROOP_TIERS = [
+  { name:'Militia',  power:1,  wage:1,  cost:10 },
+  { name:'Footman',  power:3,  wage:3,  cost:30 },
+  { name:'Veteran',  power:6,  wage:6,  cost:70 },
+  { name:'Knight',   power:12, wage:12, cost:150 },
+];
+const GOODS = ['grain','iron','cloth','fish'];
+
+function dist(a,b){return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2);}
+function randInt(a,b){return Math.floor(Math.random()*(b-a+1))+a;}
+function randPick(a){return a[randInt(0,a.length-1)];}
+function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
+
+function calcPower(party){
+  let p=0;
+  party.troops.forEach(t=>p+=t.count*TROOP_TIERS[t.tier].power);
+  if(party.skills) p*=(1+party.skills.tactics*0.08);
+  return Math.round(p);
+}
+
+function autoResolve(atk,def){
+  let ap=calcPower(atk), dp=calcPower(def);
+  let at=atk.troops.reduce((s,t)=>s+t.count,0);
+  let dt=def.troops.reduce((s,t)=>s+t.count,0);
+  if(!at||!dt)return null;
+  let r=clamp(ap/(ap+dp)+(Math.random()-0.5)*0.2,0.05,0.95);
+  let win=r>0.5;
+  let aLR=win?(1-r)*0.6:(1-r)*0.9;
+  let dLR=win?r*0.9:r*0.6;
+  function applyLoss(troops,losses){
+    let rem=Math.round(losses);
+    for(let i=0;i<troops.length&&rem>0;i++){let k=Math.min(troops[i].count,rem);troops[i].count-=k;rem-=k;}
+    return troops.filter(t=>t.count>0);
+  }
+  atk.troops=applyLoss(atk.troops,at*aLR);
+  def.troops=applyLoss(def.troops,dt*dLR);
+  return {win, aLoss:Math.round(at*aLR), dLoss:Math.round(dt*dLR), loot:win?Math.round(dt*dLR*5*Math.random()):0};
+}
+
+// ---- PLAYER STATE ----
+const player = {
+  gold:200, troops:[{tier:0,count:10},{tier:1,count:3}],
+  inventory:{grain:0,iron:0,cloth:0,fish:0},
+  skills:{tactics:1,trading:1,leadership:1,pathfinding:1},
+  xp:0, level:1, renown:0,
+};
+
+// ============================================================
+//  WORLD SCENE
+// ============================================================
+class WorldScene extends Phaser.Scene {
+  constructor(){super('WorldScene');}
+
+  create(){
+    this.paused = true;
+    this.dayTimer = 0;
+    this.day = 1;
+    this.battleLog = '';
+    this.logTimer = 0;
+    this.activePanel = null;
+    this.gameSpeed = 1;
+
+    // Generate terrain
+    this.terrainGrid = new Uint8Array(GRID_W * GRID_H);
+    this.costGrid = new Float32Array(GRID_W * GRID_H);
+    this.generateTerrain();
+    this.renderTerrain();
+
+    // Place towns
+    this.towns = this.placeTowns(8);
+    this.drawTowns();
+
+    // Pathfinder
+    this.pathfinder = new AStar(this.costGrid, GRID_W, GRID_H);
+
+    // Player
+    this.playerGfx = this.add.graphics().setDepth(50);
+    const st = this.towns[0];
+    this.playerPos = { x: st.x*TILE+TILE/2, y: st.y*TILE+TILE/2 };
+    this.playerPath = [];
+    this.playerPathIdx = 0;
+    this.drawPlayer();
+
+    // Camera
+    this.cameras.main.setBounds(0,0,MAP_W,MAP_H);
+    this.camTarget = { x:this.playerPos.x, y:this.playerPos.y };
+    this.cameras.main.startFollow(this.camTarget,false,0.08,0.08);
+    this.cameras.main.setZoom(2);
+
+    // Path preview graphics
+    this.pathGfx = this.add.graphics().setDepth(40);
+
+    // Click to move
+    this.input.on('pointerdown', (ptr) => {
+      if(this.activePanel) return;
+      // Check if clicking on HUD area (top 50px in screen space)
+      if(ptr.y < 50) return;
+      const wx=ptr.worldX, wy=ptr.worldY;
+      const gx=clamp(Math.floor(wx/TILE),0,GRID_W-1);
+      const gy=clamp(Math.floor(wy/TILE),0,GRID_H-1);
+      if(this.costGrid[gy*GRID_W+gx]>=999) return;
+      const px=clamp(Math.floor(this.playerPos.x/TILE),0,GRID_W-1);
+      const py=clamp(Math.floor(this.playerPos.y/TILE),0,GRID_H-1);
+      const path=this.pathfinder.findPath(px,py,gx,gy);
+      if(path&&path.length>1){
+        this.playerPath=path;this.playerPathIdx=1;
+        this.drawPathPreview(path);
+      }
+    });
+
+    // NPCs
+    this.npcs = [];
+    this.towns.forEach((t,i)=>{
+      if(i%2===0) this.spawnNPC(`Lord of ${t.name}`,t.faction,t.x,t.y,'lord',
+        [{tier:1,count:randInt(10,18)},{tier:2,count:randInt(4,9)},{tier:3,count:randInt(1,4)}]);
+    });
+    for(let i=0;i<8;i++){
+      let gx,gy;do{gx=randInt(5,GRID_W-5);gy=randInt(5,GRID_H-5);}while(this.costGrid[gy*GRID_W+gx]>=999);
+      this.spawnNPC('Bandit Gang','Bandit',gx,gy,'bandit',
+        [{tier:0,count:randInt(5,18)},{tier:1,count:randInt(0,5)}]);
+    }
+    for(let i=0;i<4;i++){
+      const t=randPick(this.towns);
+      this.spawnNPC('Caravan',t.faction,t.x,t.y,'caravan',
+        [{tier:0,count:randInt(3,7)},{tier:1,count:randInt(1,3)}]);
+    }
+
+    // HUD
+    this.createHUD();
+
+    // Keys
+    this.input.keyboard.addKey('SPACE').on('down',()=>this.togglePause());
+    this.input.keyboard.addKey('P').on('down',()=>this.showPartyPanel());
+    this.input.keyboard.addKey('I').on('down',()=>this.showInventoryPanel());
+    this.input.keyboard.addKey('ESC').on('down',()=>this.closePanel());
+    this.input.keyboard.addKey('ONE').on('down',()=>this.gameSpeed=1);
+    this.input.keyboard.addKey('TWO').on('down',()=>this.gameSpeed=2);
+    this.input.keyboard.addKey('THREE').on('down',()=>this.gameSpeed=4);
+
+    // Zoom
+    this.input.on('wheel',(p,go,dx,dy)=>{
+      this.cameras.main.setZoom(clamp(this.cameras.main.zoom-dy*0.001,0.8,4));
+    });
+  }
+
+  generateTerrain(){
+    const scale=0.018, forestScale=0.04;
+    for(let y=0;y<GRID_H;y++){for(let x=0;x<GRID_W;x++){
+      const idx=y*GRID_W+x;
+      let elev=Noise.fbm(x*scale,y*scale,5);
+      elev=(elev+1)*0.5;
+      const cx=x/GRID_W-0.5, cy=y/GRID_H-0.5;
+      elev=elev*0.7+(1-Math.sqrt(cx*cx+cy*cy)*2.2)*0.3;
+      let terrain;
+      if(elev<0.25)terrain=TERRAIN.DEEP_WATER;
+      else if(elev<0.32)terrain=TERRAIN.WATER;
+      else if(elev<0.36)terrain=TERRAIN.SAND;
+      else if(elev<0.65){
+        const f=Noise.fbm(x*forestScale+100,y*forestScale+100,3);
+        terrain=f>0.25?TERRAIN.DENSE_FOREST:f>0.0?TERRAIN.FOREST:TERRAIN.GRASS;
+      }
+      else if(elev<0.75)terrain=TERRAIN.HILLS;
+      else if(elev<0.85)terrain=TERRAIN.MOUNTAIN;
+      else terrain=TERRAIN.SNOW;
+      this.terrainGrid[idx]=terrain.id;
+      this.costGrid[idx]=terrain.cost;
+    }}
+  }
+
+  renderTerrain(){
+    const rt=this.add.renderTexture(0,0,MAP_W,MAP_H).setOrigin(0).setDepth(0);
+    const g=this.make.graphics({add:false});
+    for(let y=0;y<GRID_H;y++){for(let x=0;x<GRID_W;x++){
+      const t=TERRAIN_BY_ID[this.terrainGrid[y*GRID_W+x]];
+      const v=Noise.noise2d(x*0.3,y*0.3)*0.05;
+      let r=((t.color>>16)&0xff)/255+v;
+      let gr=((t.color>>8)&0xff)/255+v;
+      let b=(t.color&0xff)/255+v;
+      r=clamp(r,0,1);gr=clamp(gr,0,1);b=clamp(b,0,1);
+      g.fillStyle((Math.round(r*255)<<16)|(Math.round(gr*255)<<8)|Math.round(b*255));
+      g.fillRect(x*TILE,y*TILE,TILE,TILE);
+    }}
+    rt.draw(g);g.destroy();
+  }
+
+  placeTowns(count){
+    const names=['Riverholt','Ashford','Thornwall','Dustmere','Frostpeak','Goldmere','Crestfall','Windhaven'];
+    const factions=['Kingdom','Kingdom','Kingdom','Empire','Empire','Empire','Rebels','Rebels'];
+    const towns=[];const minD=35;
+    for(let i=0;i<count;i++){
+      let att=0,gx,gy;
+      do{gx=randInt(20,GRID_W-20);gy=randInt(20,GRID_H-20);att++;}
+      while(att<500&&(this.costGrid[gy*GRID_W+gx]>=999||this.terrainGrid[gy*GRID_W+gx]===TERRAIN.SAND.id||
+        towns.some(t=>Math.abs(t.x-gx)+Math.abs(t.y-gy)<minD)));
+      towns.push({name:names[i],x:gx,y:gy,faction:factions[i],
+        goods:{grain:randInt(8,30),iron:randInt(10,55),cloth:randInt(10,40),fish:randInt(5,35)},recruitPool:randInt(5,12)});
+    }
+    return towns;
+  }
+
+  drawTowns(){
+    this.towns.forEach(t=>{
+      const px=t.x*TILE+TILE/2,py=t.y*TILE+TILE/2;
+      const g=this.add.graphics().setDepth(30);
+      g.fillStyle(0xddccaa);g.fillRect(px-6,py-6,12,12);
+      g.lineStyle(1,FACTION_COLORS[t.faction]);g.strokeRect(px-6,py-6,12,12);
+      g.fillStyle(0xccbb99);g.fillRect(px-8,py-9,4,4);g.fillRect(px+4,py-9,4,4);
+      this.add.text(px,py+10,t.name,{fontSize:'7px',fontFamily:'monospace',color:'#eee',stroke:'#000',strokeThickness:2}).setOrigin(0.5,0).setDepth(31);
+      const zone=this.add.zone(px,py,24,24).setInteractive({useHandCursor:true}).setDepth(55);
+      zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterTown(t);});
+    });
+  }
+
+  // ---- NPCs ----
+  spawnNPC(name,faction,gx,gy,type,troops){
+    const g=this.add.graphics().setDepth(45);
+    const npc={name,faction,type,troops,x:gx*TILE+TILE/2,y:gy*TILE+TILE/2,
+      graphics:g,path:[],pathIdx:0,speed:type==='bandit'?45:type==='caravan'?30:50,
+      alive:true,respawnTimer:0,retargetTimer:0};
+    this.drawNPC(npc);this.npcs.push(npc);
+  }
+
+  drawNPC(npc){
+    npc.graphics.clear();if(!npc.alive)return;
+    const c=FACTION_COLORS[npc.faction]||0x888888;
+    npc.graphics.fillStyle(c);
+    if(npc.type==='lord'){npc.graphics.fillRect(-5,-5,10,10);npc.graphics.lineStyle(1,0xffffff,0.5);npc.graphics.strokeRect(-5,-5,10,10);}
+    else if(npc.type==='bandit'){npc.graphics.fillCircle(0,0,5);}
+    else{npc.graphics.fillTriangle(0,-5,-4,4,4,4);}
+    npc.graphics.setPosition(npc.x,npc.y);
+  }
+
+  drawPlayer(){
+    this.playerGfx.clear();
+    this.playerGfx.fillStyle(0xffffff);
+    this.playerGfx.fillTriangle(0,-8,-6,6,6,6);
+    this.playerGfx.lineStyle(1.5,0xffdd44);
+    this.playerGfx.strokeTriangle(0,-8,-6,6,6,6);
+    this.playerGfx.setPosition(this.playerPos.x,this.playerPos.y);
+  }
+
+  drawPathPreview(path){
+    this.pathGfx.clear();
+    this.pathGfx.lineStyle(1,0xffdd44,0.3);
+    this.pathGfx.beginPath();
+    path.forEach((p,i)=>{
+      const px=p.x*TILE+TILE/2,py=p.y*TILE+TILE/2;
+      if(i===0)this.pathGfx.moveTo(px,py);else this.pathGfx.lineTo(px,py);
+    });
+    this.pathGfx.strokePath();
+  }
+
+  // Threat map for NPC avoidance
+  buildThreatMap(npc){
+    const map=new Float32Array(GRID_W*GRID_H);
+    const myPow=calcPower(npc);
+    // Player threat
+    const pp=calcPower(player);
+    if(pp>myPow*1.3){
+      this.stampThreat(map,Math.floor(this.playerPos.x/TILE),Math.floor(this.playerPos.y/TILE),pp/myPow);
+    }
+    // Other NPC threats
+    this.npcs.forEach(o=>{
+      if(o===npc||!o.alive||o.faction===npc.faction)return;
+      const op=calcPower(o);
+      if(op>myPow*1.3){
+        this.stampThreat(map,Math.floor(o.x/TILE),Math.floor(o.y/TILE),op/myPow);
+      }
+    });
+    return map;
+  }
+
+  stampThreat(map,cx,cy,ratio){
+    const radius=Math.min(18,Math.round(5+ratio*3));
+    const cost=ratio*8;
+    for(let dy=-radius;dy<=radius;dy++){for(let dx=-radius;dx<=radius;dx++){
+      const nx=cx+dx,ny=cy+dy;
+      if(nx<0||nx>=GRID_W||ny<0||ny>=GRID_H)continue;
+      const d=Math.sqrt(dx*dx+dy*dy);
+      if(d<=radius) map[ny*GRID_W+nx]+=cost*(1-d/radius);
+    }}
+  }
+
+  npcPickTarget(npc){
+    if(npc.type==='bandit'){
+      const myPow=calcPower(npc);
+      // Chase weaker player
+      if(calcPower(player)<myPow*0.7&&dist(npc,this.playerPos)<300)
+        return{x:Math.floor(this.playerPos.x/TILE),y:Math.floor(this.playerPos.y/TILE)};
+      // Hunt caravans
+      let weak=null,wd=Infinity;
+      this.npcs.forEach(o=>{if(!o.alive||o===npc||o.faction===npc.faction)return;
+        if(o.type==='caravan'&&calcPower(o)<myPow){const d=dist(npc,o);if(d<wd){wd=d;weak=o;}}});
+      if(weak&&wd<400)return{x:Math.floor(weak.x/TILE),y:Math.floor(weak.y/TILE)};
+      // Wander
+      let gx,gy;do{gx=randInt(10,GRID_W-10);gy=randInt(10,GRID_H-10);}while(this.costGrid[gy*GRID_W+gx]>=999);
+      return{x:gx,y:gy};
+    }
+    if(npc.type==='caravan'){const t=randPick(this.towns);return{x:t.x,y:t.y};}
+    const ft=this.towns.filter(t=>t.faction===npc.faction);
+    const t=randPick(ft.length?ft:this.towns);
+    return{x:clamp(t.x+randInt(-3,3),0,GRID_W-1),y:clamp(t.y+randInt(-3,3),0,GRID_H-1)};
+  }
+
+  npcRepath(npc){
+    const tgt=this.npcPickTarget(npc);
+    const gx=clamp(Math.floor(npc.x/TILE),0,GRID_W-1);
+    const gy=clamp(Math.floor(npc.y/TILE),0,GRID_H-1);
+    const threatMap=this.buildThreatMap(npc);
+    const path=this.pathfinder.findPath(gx,gy,clamp(tgt.x,0,GRID_W-1),clamp(tgt.y,0,GRID_H-1),threatMap);
+    if(path&&path.length>1){npc.path=path;npc.pathIdx=1;}
+    npc.retargetTimer=randInt(4,10);
+  }
+
+  // ---- HUD ----
+  createHUD(){
+    const cam=this.cameras.main;
+    this.hudBg=this.add.rectangle(cam.width/2,0,cam.width,44,0x000000,0.75).setOrigin(0.5,0).setScrollFactor(0).setDepth(200);
+    this.hudText=this.add.text(8,6,'',{fontSize:'11px',fontFamily:'monospace',color:'#eee'}).setScrollFactor(0).setDepth(201);
+    this.pauseLabel=this.add.text(cam.width/2,4,'⏸ PAUSED [SPACE]',{fontSize:'12px',fontFamily:'monospace',color:'#ff8',fontStyle:'bold'}).setOrigin(0.5,0).setScrollFactor(0).setDepth(201);
+    this.speedLabel=this.add.text(cam.width/2,20,'Speed: 1x [1/2/3]',{fontSize:'9px',fontFamily:'monospace',color:'#aaa'}).setOrigin(0.5,0).setScrollFactor(0).setDepth(201);
+
+    const bx=cam.width-8;
+    this.add.text(bx-90,8,'[P]arty',{fontSize:'11px',fontFamily:'monospace',color:'#8cf',backgroundColor:'#222',padding:{x:4,y:2}})
+      .setScrollFactor(0).setDepth(201).setInteractive({useHandCursor:true}).on('pointerdown',()=>this.showPartyPanel());
+    this.add.text(bx-35,8,'[I]nv',{fontSize:'11px',fontFamily:'monospace',color:'#fc8',backgroundColor:'#222',padding:{x:4,y:2}})
+      .setScrollFactor(0).setDepth(201).setInteractive({useHandCursor:true}).on('pointerdown',()=>this.showInventoryPanel());
+
+    this.logText=this.add.text(8,cam.height-60,'',{fontSize:'9px',fontFamily:'monospace',color:'#ffa',wordWrap:{width:300}}).setScrollFactor(0).setDepth(201);
+    this.terrainTip=this.add.text(8,cam.height-14,'',{fontSize:'9px',fontFamily:'monospace',color:'#999'}).setScrollFactor(0).setDepth(201);
+
+    // Minimap
+    this.minimapTex=this.add.renderTexture(cam.width-134,cam.height-104,126,96).setScrollFactor(0).setDepth(200);
+    this.minimapGfx=this.make.graphics({add:false});
+    this.drawMinimap();
+  }
+
+  drawMinimap(){
+    const g=this.minimapGfx;g.clear();
+    g.fillStyle(0x000000,0.6);g.fillRect(0,0,126,96);
+    for(let y=0;y<GRID_H;y+=6){for(let x=0;x<GRID_W;x+=6){
+      g.fillStyle(TERRAIN_BY_ID[this.terrainGrid[y*GRID_W+x]].color,0.8);
+      g.fillRect(x/GRID_W*126,y/GRID_H*96,4,4);
+    }}
+    this.towns.forEach(t=>{g.fillStyle(0xffffff);g.fillRect(t.x/GRID_W*126-1,t.y/GRID_H*96-1,3,3);});
+    this.npcs.forEach(n=>{if(!n.alive)return;g.fillStyle(FACTION_COLORS[n.faction]||0x888888);g.fillCircle(n.x/MAP_W*126,n.y/MAP_H*96,1.5);});
+    g.fillStyle(0xffdd44);g.fillCircle(this.playerPos.x/MAP_W*126,this.playerPos.y/MAP_H*96,2.5);
+    g.lineStyle(1,0x555555);g.strokeRect(0,0,126,96);
+    this.minimapTex.clear();this.minimapTex.draw(g);
+  }
+
+  updateHUD(){
+    const tot=player.troops.reduce((s,t)=>s+t.count,0);
+    this.hudText.setText(`Gold:${player.gold} Troops:${tot} Pow:${calcPower(player)} Day:${this.day} Renown:${player.renown} Lv:${player.level}`);
+    this.pauseLabel.setVisible(this.paused);
+    this.speedLabel.setText(`Speed: ${this.gameSpeed}x [1/2/3]`);
+    if(this.battleLog)this.logText.setText(this.battleLog);
+    const ptr=this.input.activePointer;
+    const gx=clamp(Math.floor(ptr.worldX/TILE),0,GRID_W-1);
+    const gy=clamp(Math.floor(ptr.worldY/TILE),0,GRID_H-1);
+    const terr=TERRAIN_BY_ID[this.terrainGrid[gy*GRID_W+gx]];
+    this.terrainTip.setText(`${terr.name} (${gx},${gy}) ${terr.cost>=999?'Impassable':'Cost:'+terr.cost.toFixed(1)}`);
+  }
+
+  togglePause(){this.paused=!this.paused;}
+
+  update(time,delta){
+    this.updateHUD();
+    if(this.activePanel||this.paused)return;
+    const dt=(delta/1000)*this.gameSpeed;
+
+    this.dayTimer+=dt;
+    if(this.dayTimer>=6){this.dayTimer=0;this.day++;this.dailyTick();}
+    if(this.battleLog){this.logTimer+=dt;if(this.logTimer>8){this.battleLog='';this.logTimer=0;}}
+
+    // Player movement along A* path
+    if(this.playerPath.length>0&&this.playerPathIdx<this.playerPath.length){
+      const tgt=this.playerPath[this.playerPathIdx];
+      const tx=tgt.x*TILE+TILE/2,ty=tgt.y*TILE+TILE/2;
+      const speed=80*(1+player.skills.pathfinding*0.06);
+      const gx=clamp(Math.floor(this.playerPos.x/TILE),0,GRID_W-1);
+      const gy=clamp(Math.floor(this.playerPos.y/TILE),0,GRID_H-1);
+      const tc=this.costGrid[gy*GRID_W+gx];
+      const sp=speed/Math.max(1,tc);
+      const d=dist(this.playerPos,{x:tx,y:ty});
+      if(d>2){
+        this.playerPos.x+=(tx-this.playerPos.x)/d*sp*dt;
+        this.playerPos.y+=(ty-this.playerPos.y)/d*sp*dt;
+      }else{
+        this.playerPathIdx++;
+        if(this.playerPathIdx>=this.playerPath.length){this.playerPath=[];this.pathGfx.clear();}
+      }
+      this.drawPlayer();this.camTarget.x=this.playerPos.x;this.camTarget.y=this.playerPos.y;
+    }
+
+    // NPC movement
+    this.npcs.forEach(npc=>{
+      if(!npc.alive){npc.respawnTimer-=dt;if(npc.respawnTimer<=0)this.respawnNPC(npc);return;}
+      npc.retargetTimer-=dt;
+      if(npc.retargetTimer<=0||npc.path.length===0||npc.pathIdx>=npc.path.length)this.npcRepath(npc);
+      if(npc.path.length>0&&npc.pathIdx<npc.path.length){
+        const t=npc.path[npc.pathIdx];
+        const tx=t.x*TILE+TILE/2,ty=t.y*TILE+TILE/2;
+        const d=dist(npc,{x:tx,y:ty});
+        const gx=clamp(Math.floor(npc.x/TILE),0,GRID_W-1);
+        const gy=clamp(Math.floor(npc.y/TILE),0,GRID_H-1);
+        const sp=npc.speed/Math.max(1,this.costGrid[gy*GRID_W+gx]);
+        if(d>2){npc.x+=(tx-npc.x)/d*sp*dt;npc.y+=(ty-npc.y)/d*sp*dt;}
+        else npc.pathIdx++;
+      }
+      this.drawNPC(npc);
+      if(dist(npc,this.playerPos)<12)this.handleEncounter(npc);
+    });
+
+    // NPC vs NPC
+    for(let i=0;i<this.npcs.length;i++){for(let j=i+1;j<this.npcs.length;j++){
+      const a=this.npcs[i],b=this.npcs[j];
+      if(!a.alive||!b.alive||a.faction===b.faction)continue;
+      if(a.type==='caravan'&&b.type==='caravan')continue;
+      if(dist(a,b)<12)this.npcBattle(a,b);
+    }}
+
+    if(time%500<20)this.drawMinimap();
+  }
+
+  handleEncounter(npc){
+    if(npc.type==='bandit'){
+      this.paused=true;
+      const aC={troops:player.troops.map(t=>({...t})),skills:player.skills};
+      const dC={troops:npc.troops.map(t=>({...t}))};
+      const r=autoResolve(aC,dC);if(!r)return;
+      player.troops=aC.troops;npc.troops=dC.troops;
+      if(r.win){
+        player.gold+=r.loot;player.xp+=r.dLoss*2;player.renown+=Math.max(1,Math.round(r.dLoss/2));
+        this.battleLog=`⚔ VICTORY vs ${npc.name}! Slain:${r.dLoss} Lost:${r.aLoss} Loot:${r.loot}g`;
+        npc.alive=false;npc.respawnTimer=25;this.drawNPC(npc);
+      }else{
+        player.gold=Math.max(0,player.gold-50);
+        this.battleLog=`💀 DEFEAT by ${npc.name}! Lost:${r.aLoss}`;
+        const near=this.towns.reduce((b,t)=>dist({x:t.x*TILE,y:t.y*TILE},this.playerPos)<dist({x:b.x*TILE,y:b.y*TILE},this.playerPos)?t:b,this.towns[0]);
+        this.playerPos.x=near.x*TILE+TILE/2;this.playerPos.y=near.y*TILE+TILE/2;
+        this.playerPath=[];this.pathGfx.clear();this.drawPlayer();
+        this.camTarget.x=this.playerPos.x;this.camTarget.y=this.playerPos.y;
+      }
+      this.logTimer=0;this.checkLevelUp();
+    }else if(npc.type==='lord'){
+      this.battleLog=`Met ${npc.name} (${npc.faction}).`;this.logTimer=0;
+    }else{
+      this.battleLog=`A ${npc.faction} caravan passes by.`;this.logTimer=0;
+    }
+  }
+
+  npcBattle(a,b){
+    const aC={troops:a.troops.map(t=>({...t}))};const bC={troops:b.troops.map(t=>({...t}))};
+    const r=autoResolve(aC,bC);if(!r)return;a.troops=aC.troops;b.troops=bC.troops;
+    if(r.win&&b.troops.reduce((s,t)=>s+t.count,0)<=0){b.alive=false;b.respawnTimer=30;this.drawNPC(b);}
+    if(!r.win&&a.troops.reduce((s,t)=>s+t.count,0)<=0){a.alive=false;a.respawnTimer=30;this.drawNPC(a);}
+  }
+
+  respawnNPC(npc){
+    let gx,gy;do{gx=randInt(10,GRID_W-10);gy=randInt(10,GRID_H-10);}while(this.costGrid[gy*GRID_W+gx]>=999);
+    npc.x=gx*TILE+TILE/2;npc.y=gy*TILE+TILE/2;npc.alive=true;npc.path=[];npc.pathIdx=0;
+    if(npc.type==='bandit')npc.troops=[{tier:0,count:randInt(5,18)},{tier:1,count:randInt(0,6)}];
+    else if(npc.type==='lord')npc.troops=[{tier:1,count:randInt(10,18)},{tier:2,count:randInt(4,9)},{tier:3,count:randInt(1,4)}];
+    else npc.troops=[{tier:0,count:randInt(3,7)},{tier:1,count:randInt(1,3)}];
+    this.drawNPC(npc);
+  }
+
+  dailyTick(){
+    let wages=0;player.troops.forEach(t=>{wages+=t.count*TROOP_TIERS[t.tier].wage;});
+    player.gold-=wages;
+    if(player.gold<0){
+      player.troops.forEach(t=>{t.count=Math.max(0,t.count-Math.ceil(t.count*0.1));});
+      player.troops=player.troops.filter(t=>t.count>0);player.gold=0;
+      this.battleLog=`Day ${this.day}: Can't pay wages! Desertions.`;this.logTimer=0;
+    }
+    this.towns.forEach(t=>{t.recruitPool=Math.min(15,t.recruitPool+randInt(0,2));});
+  }
+
+  checkLevelUp(){
+    const need=player.level*50;
+    if(player.xp>=need){player.xp-=need;player.level++;this.showLevelUpPanel();}
+  }
+
+  // ---- PANELS ----
+  closePanel(){if(this.activePanel){this.activePanel.forEach(o=>o.destroy());this.activePanel=null;}}
+
+  panelBg(w,h){
+    const cam=this.cameras.main;const cx=cam.width/2,cy=cam.height/2;const objs=[];
+    objs.push(this.add.rectangle(cx,cy,cam.width,cam.height,0x000000,0.6).setScrollFactor(0).setDepth(300).setInteractive());
+    objs.push(this.add.rectangle(cx,cy,w,h,0x141424,0.95).setScrollFactor(0).setDepth(301));
+    objs.push(this.add.rectangle(cx,cy,w,h).setScrollFactor(0).setDepth(301).setStrokeStyle(2,0x444466));
+    const cl=this.add.text(cx+w/2-24,cy-h/2+6,'✕',{fontSize:'16px',color:'#f88',fontFamily:'monospace'}).setScrollFactor(0).setDepth(302).setInteractive({useHandCursor:true});
+    cl.on('pointerdown',()=>this.closePanel());objs.push(cl);
+    return{objs,cx,cy,w,h};
+  }
+
+  enterTown(town){
+    if(this.activePanel)return;
+    const pd=dist(this.playerPos,{x:town.x*TILE+TILE/2,y:town.y*TILE+TILE/2});
+    if(pd>60){this.battleLog=`Too far from ${town.name}!`;this.logTimer=0;return;}
+    this.paused=true;
+    const{objs,cx,cy,w,h}=this.panelBg(420,380);
+    const t=(txt,x,y,opts={})=>{const o=this.add.text(x,y,txt,{fontSize:'11px',fontFamily:'monospace',color:'#ccc',...opts}).setScrollFactor(0).setDepth(302);objs.push(o);return o;};
+
+    t(`🏰 ${town.name} (${town.faction})`,cx,cy-h/2+20,{fontSize:'16px',color:'#ffd866',fontStyle:'bold'}).setOrigin(0.5);
+    let yy=cy-h/2+48;
+    t('📦 Market',cx-w/2+16,yy,{fontSize:'12px',color:'#8cf',fontStyle:'bold'});yy+=18;
+
+    GOODS.forEach(g=>{
+      const price=town.goods[g]+randInt(-3,3);
+      const row=t(`${g.padEnd(7)} ${price}g (have:${player.inventory[g]||0})`,cx-w/2+24,yy);
+      const bb=t('[Buy]',cx+80,yy,{color:'#4f4',backgroundColor:'#222',padding:{x:3,y:1}});
+      bb.setInteractive({useHandCursor:true}).on('pointerdown',()=>{
+        const ap=Math.max(1,Math.round(price*(1-player.skills.trading*0.04)));
+        if(player.gold>=ap){player.gold-=ap;player.inventory[g]=(player.inventory[g]||0)+1;row.setText(`${g.padEnd(7)} ${price}g (have:${player.inventory[g]})`);}
+      });objs.push(bb);
+      const sb=t('[Sell]',cx+120,yy,{color:'#f84',backgroundColor:'#222',padding:{x:3,y:1}});
+      sb.setInteractive({useHandCursor:true}).on('pointerdown',()=>{
+        if((player.inventory[g]||0)>0){const sp=Math.max(1,Math.round(price*0.85*(1+player.skills.trading*0.04)));player.gold+=sp;player.inventory[g]--;row.setText(`${g.padEnd(7)} ${price}g (have:${player.inventory[g]})`);}
+      });objs.push(sb);
+      yy+=16;
+    });
+    yy+=10;
+    const recLabel=t(`⚔ Recruit (Pool:${town.recruitPool})`,cx-w/2+16,yy,{fontSize:'12px',color:'#fc8',fontStyle:'bold'});yy+=18;
+    TROOP_TIERS.forEach((tier,ti)=>{
+      t(`${tier.name.padEnd(9)} Pow:${tier.power} W:${tier.wage} $${tier.cost}`,cx-w/2+24,yy);
+      const hb=t('[Hire]',cx+110,yy,{color:'#4f4',backgroundColor:'#222',padding:{x:3,y:1}});
+      hb.setInteractive({useHandCursor:true}).on('pointerdown',()=>{
+        if(player.gold>=tier.cost&&town.recruitPool>0){
+          player.gold-=tier.cost;town.recruitPool--;recLabel.setText(`⚔ Recruit (Pool:${town.recruitPool})`);
+          let ex=player.troops.find(t=>t.tier===ti);if(ex)ex.count++;else player.troops.push({tier:ti,count:1});
+        }
+      });objs.push(hb);
+      yy+=16;
+    });
+    this.activePanel=objs;
+  }
+
+  showPartyPanel(){
+    if(this.activePanel)this.closePanel();this.paused=true;
+    const{objs,cx,cy,w,h}=this.panelBg(360,280);
+    const t=(txt,x,y,opts={})=>{const o=this.add.text(x,y,txt,{fontSize:'11px',fontFamily:'monospace',color:'#ccc',...opts}).setScrollFactor(0).setDepth(302);objs.push(o);return o;};
+    t('⚔ Your Party',cx,cy-h/2+20,{fontSize:'15px',color:'#ffd866',fontStyle:'bold'}).setOrigin(0.5);
+    let yy=cy-h/2+46;
+    t(`Troops:${player.troops.reduce((s,t)=>s+t.count,0)} Power:${calcPower(player)} Lv:${player.level} XP:${player.xp}/${player.level*50}`,cx-w/2+16,yy,{color:'#aaa'});yy+=20;
+    player.troops.forEach(tr=>{const ti=TROOP_TIERS[tr.tier];t(`${ti.name.padEnd(9)} x${tr.count} (Pow:${ti.power*tr.count} Wage:${ti.wage*tr.count}/d)`,cx-w/2+24,yy);yy+=16;});
+    yy+=10;t('Skills:',cx-w/2+16,yy,{color:'#8cf',fontStyle:'bold'});yy+=16;
+    Object.entries(player.skills).forEach(([sk,v])=>{t(`${sk.padEnd(13)} Lv${v}`,cx-w/2+24,yy);yy+=14;});
+    this.activePanel=objs;
+  }
+
+  showInventoryPanel(){
+    if(this.activePanel)this.closePanel();this.paused=true;
+    const{objs,cx,cy}=this.panelBg(300,220);
+    const t=(txt,x,y,opts={})=>{const o=this.add.text(x,y,txt,{fontSize:'11px',fontFamily:'monospace',color:'#ccc',...opts}).setScrollFactor(0).setDepth(302);objs.push(o);return o;};
+    t('🎒 Inventory',cx,cy-90,{fontSize:'15px',color:'#ffd866',fontStyle:'bold'}).setOrigin(0.5);
+    let yy=cy-65;t(`Gold: ${player.gold}`,cx-120,yy,{color:'#ff4'});yy+=20;
+    GOODS.forEach(g=>{t(`${g.padEnd(9)} x${player.inventory[g]||0}`,cx-120,yy);yy+=16;});
+    this.activePanel=objs;
+  }
+
+  showLevelUpPanel(){
+    if(this.activePanel)this.closePanel();this.paused=true;
+    const{objs,cx,cy}=this.panelBg(340,260);
+    const t=(txt,x,y,opts={})=>{const o=this.add.text(x,y,txt,{fontSize:'11px',fontFamily:'monospace',color:'#ccc',...opts}).setScrollFactor(0).setDepth(302);objs.push(o);return o;};
+    t(`🎉 Level ${player.level}!`,cx,cy-110,{fontSize:'15px',color:'#ffd866',fontStyle:'bold'}).setOrigin(0.5);
+    t('Choose a skill:',cx,cy-88,{color:'#aaa'}).setOrigin(0.5);
+    let yy=cy-65;
+    const desc={tactics:'+8% combat power',trading:'+4% buy/sell',leadership:'+capacity',pathfinding:'+6% map speed'};
+    Object.entries(player.skills).forEach(([sk,v])=>{
+      const b=t(`${sk} (${v}→${v+1}): ${desc[sk]}`,cx,yy,{color:'#4f4',backgroundColor:'#222',padding:{x:8,y:4}});
+      b.setOrigin(0.5).setInteractive({useHandCursor:true});
+      b.on('pointerover',()=>b.setColor('#8f8'));b.on('pointerout',()=>b.setColor('#4f4'));
+      b.on('pointerdown',()=>{player.skills[sk]++;this.closePanel();});
+      yy+=30;
+    });
+    this.activePanel=objs;
+  }
+}
+
+new Phaser.Game({
+  type:Phaser.AUTO, parent:'game-container',
+  width:window.innerWidth, height:window.innerHeight,
+  backgroundColor:'#0a0a0f', scene:[WorldScene],
+  scale:{mode:Phaser.Scale.RESIZE,autoCenter:Phaser.Scale.CENTER_BOTH},
+});
+</script>
+</body>
+</html>
