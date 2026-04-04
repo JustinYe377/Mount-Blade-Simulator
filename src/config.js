@@ -4,7 +4,7 @@
 // ============================================================
 
 // --- Grid & Map ---
-const TILE   = 8;
+const TILE   = 24;
 const GRID_W = 240;
 const GRID_H = 180;
 const MAP_W  = GRID_W * TILE;
