@@ -1,10 +1,10 @@
 // ============================================================
 // Player.js — Mutable player state (singleton object)
-// Import order: must come after config.js
+// troops use {id, count} where id maps to TROOP_BY_ID
 // ============================================================
 const player = {
-  gold:      200,
-  troops:    [{tier:0, count:10}, {tier:1, count:3}],
+  gold:      1000000,
+  troops:    [{id:0, count:10}, {id:1, count:20}],  // 10 Villagers + 3 Militia
   inventory: { grain:0, iron:0, cloth:0, fish:0 },
   skills:    { tactics:1, trading:1, leadership:1, pathfinding:1 },
   xp:        0,

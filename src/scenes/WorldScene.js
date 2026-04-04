@@ -1,11 +1,96 @@
 // ============================================================
-// WorldScene.js — Main Phaser scene: world map, NPCs, HUD
-// Depends on (must be loaded before this file):
-//   config.js, utils/Noise.js, utils/MinHeap.js,
-//   utils/helpers.js, systems/AStar.js, world/Roads.js,
-//   entities/Player.js, ui/Panel.js
+// WorldScene.js — Main Phaser scene
+// Depends on: config.js, Noise.js, MinHeap.js, helpers.js,
+//             AStar.js, Roads.js, Player.js, Panel.js
 // ============================================================
 
+// ---- Troop composition helpers ----
+
+/** Make a troop entry */
+function tr(id, count) { return { id, count }; }
+
+/**
+ * Build a Lord's party: mixed infantry/cavalry/archer, upper tiers.
+ * faction param reserved for per-faction flavour later.
+ */
+function lordTroops() {
+  return [
+    tr(1, randInt(8,14)),   // Militia
+    tr(2, randInt(4,8)),    // Footman
+    tr(3, randInt(1,4)),    // Man-at-Arms
+    tr(4, randInt(3,7)),    // Scout Cavalry
+    tr(5, randInt(1,4)),    // Light Cavalry
+    tr(6, randInt(0,2)),    // Knight
+    tr(7, randInt(3,7)),    // Archer
+    tr(8, randInt(1,3)),    // Trained Archer
+  ].filter(t => t.count > 0);
+}
+
+/** Bandits: infantry only (militia + footman) */
+function banditTroops() {
+  return [
+    tr(1, randInt(5,16)),   // Militia
+    tr(2, randInt(0,5)),    // Footman
+  ].filter(t => t.count > 0);
+}
+
+/** Villager party (wandering villagers from a village) */
+function villagerTroops() {
+  return [ tr(0, randInt(4,10)) ];
+}
+
+/** Caravan: mixed low-tier escort */
+function caravanTroops() {
+  return [
+    tr(0, randInt(2,5)),    // Villagers (labourers)
+    tr(1, randInt(2,6)),    // Militia guards
+    tr(7, randInt(1,3)),    // Archer guards
+  ].filter(t => t.count > 0);
+}
+
+// ---- Tooltip helpers ----
+
+/**
+ * Build the display name shown under a party sprite.
+ * - lord   → "[FactionBanner] Lord <name>'s Military"
+ * - villager → "Village <name>'s Villagers"
+ * - bandit   → "Bandits"
+ * - caravan  → "[FactionBanner] <faction> Caravan"
+ */
+function npcLabel(npc) {
+  const total = npc.troops.reduce((s,t) => s+t.count, 0);
+  switch (npc.type) {
+    case 'lord':     return [`${npc.faction} Lord ${npc.originName}'s Military`, total];
+    case 'villager': return [`Village ${npc.originName}'s Villagers`,            total];
+    case 'bandit':   return ['Bandits',                                           total];
+    case 'caravan':  return [`${npc.faction} Caravan`,                           total];
+    default:         return [npc.name,                                            total];
+  }
+}
+
+/**
+ * Build tooltip lines shown on hover.
+ * Shows faction, unit kinds (Infantry/Cavalry/Archer/Villager), speed, power.
+ * Does NOT expose individual tier names.
+ */
+function npcTooltipLines(npc) {
+  const inf  = countKind(npc.troops, 'infantry');
+  const cav  = countKind(npc.troops, 'cavalry');
+  const arc  = countKind(npc.troops, 'archer');
+  const vil  = countKind(npc.troops, 'villager');
+  const spd  = calcSpeed(npc.troops, npc.baseSpeed);
+  const pow  = calcPower(npc);
+  const lines = [];
+  lines.push(`Faction: ${npc.faction}`);
+  if (inf)  lines.push(`Infantry:  ${inf}`);
+  if (cav)  lines.push(`Cavalry:   ${cav}`);
+  if (arc)  lines.push(`Archers:   ${arc}`);
+  if (vil)  lines.push(`Villagers: ${vil}`);
+  lines.push(`Power: ${pow}   Speed: ${spd}`);
+  return lines;
+}
+
+// ============================================================
 class WorldScene extends Phaser.Scene {
   constructor() { super('WorldScene'); }
 
@@ -49,6 +134,10 @@ class WorldScene extends Phaser.Scene {
     // Path preview
     this.pathGfx = this.add.graphics().setDepth(40);
 
+    // Hover tooltip (world-space, depth 60)
+    this._tooltipObjs = [];
+    this._hoveredNpc  = null;
+
     // Click to move
     this.input.on('pointerdown', (ptr) => {
       if (this.activePanel) return;
@@ -68,24 +157,32 @@ class WorldScene extends Phaser.Scene {
 
     // NPCs
     this.npcs = [];
-    this.towns.forEach((t,i) => {
-      if (i%2===0) this.spawnNPC(
-        `Lord of ${t.name}`, t.faction, t.x, t.y, 'lord',
-        [{tier:1,count:randInt(10,18)},{tier:2,count:randInt(4,9)},{tier:3,count:randInt(1,4)}]
-      );
+
+    // Spawn static Lords — distribute across towns by faction
+    const factionTowns = {};
+    this.towns.forEach(t => { (factionTowns[t.faction] = factionTowns[t.faction]||[]).push(t); });
+
+    LORD_DEFS.forEach(lordDef => {
+      const pool = factionTowns[lordDef.faction] || this.towns;
+      const t    = randPick(pool);
+      const npc  = this.spawnNPC(lordDef.name, lordDef.faction, t.x, t.y, 'lord',
+                                  lordDef.troops.map(tr => ({...tr})), lordDef.name);
+      npc.lordDef = lordDef;  // attach static lord data
     });
+
     for (let i=0; i<8; i++) {
       let gx, gy;
       do { gx=randInt(5,GRID_W-5); gy=randInt(5,GRID_H-5); }
       while (this.costGrid[gy*GRID_W+gx] >= 999);
-      this.spawnNPC('Bandit Gang','Bandit',gx,gy,'bandit',
-        [{tier:0,count:randInt(5,18)},{tier:1,count:randInt(0,5)}]);
+      this.spawnNPC('Bandits', 'Bandit', gx, gy, 'bandit', banditTroops(), 'Bandits');
     }
     for (let i=0; i<4; i++) {
       const t = randPick(this.towns);
-      this.spawnNPC('Caravan', t.faction, t.x, t.y, 'caravan',
-        [{tier:0,count:randInt(3,7)},{tier:1,count:randInt(1,3)}]);
+      this.spawnNPC(`${t.faction} Caravan`, t.faction, t.x, t.y, 'caravan', caravanTroops(), t.name);
     }
+    this.towns.filter(t => t.tier===0).forEach(t => {
+      this.spawnNPC(`${t.name} Villagers`, t.faction, t.x, t.y, 'villager', villagerTroops(), t.name);
+    });
 
     // HUD
     this.createHUD();
@@ -99,7 +196,6 @@ class WorldScene extends Phaser.Scene {
     this.input.keyboard.addKey('TWO').on('down',   ()=>this.gameSpeed=2);
     this.input.keyboard.addKey('THREE').on('down', ()=>this.gameSpeed=4);
 
-    // Scroll-wheel zoom
     this.input.on('wheel', (p,go,dx,dy) => {
       this.cameras.main.setZoom(clamp(this.cameras.main.zoom - dy*0.001, 0.8, 4));
     });
@@ -155,7 +251,6 @@ class WorldScene extends Phaser.Scene {
     const rt = this.add.renderTexture(0, 0, MAP_W, MAP_H).setOrigin(0).setDepth(1);
     const g  = this.make.graphics({add:false});
 
-    // Coastline shadow
     for (let y=1; y<GRID_H-1; y++) { for (let x=1; x<GRID_W-1; x++) {
       const tid = this.terrainGrid[y*GRID_W+x];
       if (tid <= TERRAIN.WATER.id) continue;
@@ -166,8 +261,6 @@ class WorldScene extends Phaser.Scene {
       if (this.terrainGrid[(y+1)*GRID_W+x]<=TERRAIN.WATER.id) adj++;
       if (adj>0) { g.fillStyle(0x000000,0.22+adj*0.05); g.fillRect(x*TILE,y*TILE,TILE,TILE); }
     }}
-
-    // Forest canopy dots
     for (let y=0; y<GRID_H; y+=2) { for (let x=0; x<GRID_W; x+=2) {
       const tid = this.terrainGrid[y*GRID_W+x];
       if (tid!==TERRAIN.FOREST.id && tid!==TERRAIN.DENSE_FOREST.id) continue;
@@ -176,8 +269,6 @@ class WorldScene extends Phaser.Scene {
       const ox=(x*7+y*3)%4, oy=(y*5+x*2)%4;
       g.fillCircle(x*TILE+ox+2, y*TILE+oy+2, 2.2);
     }}
-
-    // Mountain ridge highlights
     for (let y=1; y<GRID_H; y++) { for (let x=0; x<GRID_W; x++) {
       const tid = this.terrainGrid[y*GRID_W+x];
       if (tid!==TERRAIN.MOUNTAIN.id && tid!==TERRAIN.SNOW.id) continue;
@@ -186,7 +277,6 @@ class WorldScene extends Phaser.Scene {
         g.fillStyle(0xffffff,0.14); g.fillRect(x*TILE, y*TILE, TILE, 2);
       }
     }}
-
     // Roads
     const drawn = new Set();
     this.towns.forEach((a,ai) => {
@@ -212,7 +302,6 @@ class WorldScene extends Phaser.Scene {
         g.strokePath();
       });
     });
-
     rt.draw(g); g.destroy();
   }
 
@@ -231,7 +320,7 @@ class WorldScene extends Phaser.Scene {
         towns.some(t => Math.abs(t.x-gx)+Math.abs(t.y-gy)<minD)
       ));
       towns.push({
-        name: names[i], x: gx, y: gy, faction: factions[i], tier: tiers[i] || 0,
+        name: names[i], x: gx, y: gy, faction: factions[i], tier: tiers[i]||0,
         goods: { grain:randInt(8,30), iron:randInt(10,55), cloth:randInt(10,40), fish:randInt(5,35) },
         recruitPool: randInt(5,12),
       });
@@ -256,7 +345,6 @@ class WorldScene extends Phaser.Scene {
         zone.on('pointerover',()=>{hover.clear();hover.fillStyle(0xffffff,0.10);hover.fillCircle(px,py,9);});
         zone.on('pointerout', ()=>hover.clear());
         zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterTown(t);});
-
       } else if (tier===1) {
         g.fillStyle(fc,0.18); g.fillCircle(px,py,11);
         g.fillStyle(0xd4c090); g.fillRect(px-5,py-5,10,10);
@@ -269,7 +357,6 @@ class WorldScene extends Phaser.Scene {
         zone.on('pointerover',()=>{hover.clear();hover.fillStyle(0xffffff,0.14);hover.fillCircle(px,py,13);});
         zone.on('pointerout', ()=>hover.clear());
         zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterTown(t);});
-
       } else {
         g.fillStyle(fc,0.08); g.fillCircle(px,py,20);
         g.fillStyle(fc,0.22); g.fillCircle(px,py,14);
@@ -291,34 +378,133 @@ class WorldScene extends Phaser.Scene {
   }
 
   // ---- NPCs ----
-  spawnNPC(name, faction, gx, gy, type, troops) {
-    const g = this.add.graphics().setDepth(45);
+  /**
+   * @param {string} name      — internal name
+   * @param {string} faction   — faction key
+   * @param {number} gx,gy    — grid coords
+   * @param {string} type      — 'lord'|'bandit'|'caravan'|'villager'
+   * @param {Array}  troops    — [{id,count}, ...]
+   * @param {string} originName — town/bandit origin name for label
+   */
+  spawnNPC(name, faction, gx, gy, type, troops, originName='?') {
+    const baseSpeed = type==='bandit' ? 45 : type==='caravan' ? 30 : type==='villager' ? 35 : 50;
+    const g         = this.add.graphics().setDepth(45);
+    const labelTxt  = this.add.text(0, 0, '', {
+      fontSize: THEME.font.xs, fontFamily: THEME.font.ui,
+      color: THEME.text.primary, stroke: '#000', strokeThickness: 2,
+    }).setDepth(46).setOrigin(0.5, 0);
+
     const npc = {
-      name, faction, type, troops,
+      name, faction, type, troops, originName,
       x: gx*TILE+TILE/2, y: gy*TILE+TILE/2,
-      graphics: g, path: [], pathIdx: 0,
-      speed: type==='bandit'?45 : type==='caravan'?30 : 50,
-      alive: true, respawnTimer: 0, retargetTimer: 0
+      graphics: g, labelTxt,
+      path: [], pathIdx: 0,
+      baseSpeed, speed: baseSpeed,
+      alive: true, respawnTimer: 0, retargetTimer: 0,
     };
-    this.drawNPC(npc); this.npcs.push(npc);
+    // Hover zone (recreated in drawNPC)
+    npc.hoverZone = null;
+    this.drawNPC(npc);
+    this.npcs.push(npc);
+    return npc;
   }
 
   drawNPC(npc) {
-    npc.graphics.clear(); if (!npc.alive) return;
-    const c = THEME.faction[npc.faction] || 0x888888;
+    npc.graphics.clear();
+    if (npc.labelTxt) npc.labelTxt.setText('');
+
+    if (!npc.alive) return;
+
+    const c     = THEME.faction[npc.faction] || 0x888888;
+    const total = npc.troops.reduce((s,t) => s+t.count, 0);
+    const [labelLine] = npcLabel(npc);
+
+    // --- sprite ---
+    const g = npc.graphics;
     if (npc.type==='lord') {
-      npc.graphics.fillStyle(0x000000,0.4); npc.graphics.fillRect(-4,-4,10,10);
-      npc.graphics.fillStyle(c,0.9);        npc.graphics.fillRect(-5,-5,10,10);
-      npc.graphics.lineStyle(1.5,0xffd866,0.85); npc.graphics.strokeRect(-5,-5,10,10);
+      g.fillStyle(0x000000,0.4); g.fillRect(-4,-4,10,10);
+      g.fillStyle(c,0.9);        g.fillRect(-5,-5,10,10);
+      g.lineStyle(1.5,0xffd866,0.85); g.strokeRect(-5,-5,10,10);
     } else if (npc.type==='bandit') {
-      npc.graphics.fillStyle(0x000000,0.4); npc.graphics.fillCircle(1,1,5);
-      npc.graphics.fillStyle(c,0.85);       npc.graphics.fillCircle(0,0,5);
-      npc.graphics.fillStyle(0x000000,0.45);npc.graphics.fillCircle(0,0,2);
+      g.fillStyle(0x000000,0.4); g.fillCircle(1,1,5);
+      g.fillStyle(c,0.85);       g.fillCircle(0,0,5);
+      g.fillStyle(0x000000,0.45);g.fillCircle(0,0,2);
+    } else if (npc.type==='villager') {
+      // Small brown square — humble
+      g.fillStyle(0x000000,0.3); g.fillRect(-3,-3,8,8);
+      g.fillStyle(0xc8a060,0.9); g.fillRect(-4,-4,8,8);
+      g.lineStyle(1,c,0.6); g.strokeRect(-4,-4,8,8);
     } else {
-      npc.graphics.fillStyle(0x000000,0.3); npc.graphics.fillTriangle(1,-4,-3,5,5,5);
-      npc.graphics.fillStyle(c,0.85);       npc.graphics.fillTriangle(0,-5,-4,4,4,4);
+      // caravan — triangle
+      g.fillStyle(0x000000,0.3); g.fillTriangle(1,-4,-3,5,5,5);
+      g.fillStyle(c,0.85);       g.fillTriangle(0,-5,-4,4,4,4);
     }
-    npc.graphics.setPosition(npc.x, npc.y);
+    g.setPosition(npc.x, npc.y);
+
+    // --- label: name + count ---
+    if (npc.labelTxt) {
+      npc.labelTxt.setText(`${labelLine}\n×${total}`);
+      npc.labelTxt.setPosition(npc.x, npc.y + 8);
+    }
+
+    // --- hover zone + tooltip ---
+    if (npc.hoverZone) { npc.hoverZone.destroy(); npc.hoverZone = null; }
+    const zone = this.add.zone(npc.x, npc.y, 22, 22).setInteractive({ useHandCursor: true }).setDepth(56);
+    zone.on('pointerover', () => this.showNpcTooltip(npc));
+    zone.on('pointerout',  () => this.hideNpcTooltip());
+    zone.on('pointerdown', (ptr) => {
+      ptr.event.stopPropagation();
+      this.hideNpcTooltip();
+      if (!npc.alive || this.activePanel) return;
+      if (npc.type === 'villager') return;
+      if (!this.isHostile(npc)) {
+        this.paused = true;
+        this.showEncounterPanel(npc);
+      }
+    });
+    npc.hoverZone = zone;
+  }
+
+  // ---- Tooltip ----
+  showNpcTooltip(npc) {
+    this.hideNpcTooltip();
+    const lines    = npcTooltipLines(npc);
+    const [label]  = npcLabel(npc);
+    const allLines = [label, ...lines];
+    const cam      = this.cameras.main;
+
+    // Convert world → screen coords
+    const sx = (npc.x - cam.worldView.x) * cam.zoom;
+    const sy = (npc.y - cam.worldView.y) * cam.zoom - 14;
+
+    const txt = this.add.text(sx, sy, allLines.join('\n'), {
+      fontSize:        THEME.font.xs,
+      fontFamily:      THEME.font.ui,
+      color:           THEME.text.primary,
+      backgroundColor: '#' + THEME.panel.fill.toString(16).padStart(6,'0') + 'ee',
+      padding:         { x: 8, y: 6 },
+      stroke:          '#000',
+      strokeThickness: 1,
+      lineSpacing:     3,
+    })
+      .setScrollFactor(0)
+      .setDepth(500)
+      .setOrigin(0.5, 1);
+
+    // Keep on screen
+    const tw = txt.width, th = txt.height;
+    const cw = cam.width,  ch = cam.height;
+    txt.setX(clamp(txt.x, tw/2+4, cw-tw/2-4));
+    txt.setY(clamp(txt.y, th+4, ch-4));
+
+    this._tooltipObjs = [txt];
+    this._hoveredNpc = npc;
+  }
+
+  hideNpcTooltip() {
+    this._tooltipObjs.forEach(o => o.destroy());
+    this._tooltipObjs = [];
+    this._hoveredNpc  = null;
   }
 
   drawPlayer() {
@@ -342,7 +528,7 @@ class WorldScene extends Phaser.Scene {
     this.pathGfx.strokePath();
   }
 
-  // ---- Threat map for NPC A* avoidance ----
+  // ---- Threat map ----
   buildThreatMap(npc) {
     const map = new Float32Array(GRID_W*GRID_H);
     const myPow = calcPower(npc);
@@ -377,14 +563,16 @@ class WorldScene extends Phaser.Scene {
       let weak=null, wd=Infinity;
       this.npcs.forEach(o => {
         if (!o.alive||o===npc||o.faction===npc.faction) return;
-        if (o.type==='caravan' && calcPower(o)<myPow) { const d=dist(npc,o); if(d<wd){wd=d;weak=o;} }
+        if (o.type==='caravan' && calcPower(o)<myPow) { const d2=dist(npc,o); if(d2<wd){wd=d2;weak=o;} }
       });
       if (weak && wd<400) return { x:Math.floor(weak.x/TILE), y:Math.floor(weak.y/TILE) };
       let gx,gy;
       do { gx=randInt(10,GRID_W-10); gy=randInt(10,GRID_H-10); } while(this.costGrid[gy*GRID_W+gx]>=999);
       return {x:gx,y:gy};
     }
-    if (npc.type==='caravan') { const t=randPick(this.towns); return {x:t.x,y:t.y}; }
+    if (npc.type==='caravan' || npc.type==='villager') {
+      const t=randPick(this.towns); return {x:t.x,y:t.y};
+    }
     const ft = this.towns.filter(t => t.faction===npc.faction);
     const t  = randPick(ft.length ? ft : this.towns);
     return { x:clamp(t.x+randInt(-3,3),0,GRID_W-1), y:clamp(t.y+randInt(-3,3),0,GRID_H-1) };
@@ -397,6 +585,8 @@ class WorldScene extends Phaser.Scene {
     const threatMap = this.buildThreatMap(npc);
     const path = this.pathfinder.findPath(gx, gy, clamp(tgt.x,0,GRID_W-1), clamp(tgt.y,0,GRID_H-1), threatMap);
     if (path && path.length>1) { npc.path=path; npc.pathIdx=1; }
+    // Recalculate speed based on current troops
+    npc.speed = calcSpeed(npc.troops, npc.baseSpeed);
     npc.retargetTimer = randInt(4,10);
   }
 
@@ -407,7 +597,6 @@ class WorldScene extends Phaser.Scene {
     this._logHistory    = [];
     this._lastNotifLog  = '';
 
-    // Top bar
     this.hudBg   = this.add.rectangle(w/2,0,w,THEME.hud.height,THEME.hud.fill,THEME.hud.fillAlpha).setOrigin(0.5,0).setScrollFactor(0).setDepth(200);
     this.hudLine = this.add.graphics().setScrollFactor(0).setDepth(201);
     this.hudLine.lineStyle(1,THEME.panel.border,0.75);
@@ -420,7 +609,6 @@ class WorldScene extends Phaser.Scene {
     this.partyBtn = createStyledButton(this, bx-130, 8, 'Party',     ()=>this.showPartyPanel(),     {depth:201,padX:8,padY:3});
     this.invBtn   = createStyledButton(this, bx-62,  8, 'Inventory', ()=>this.showInventoryPanel(), {depth:201,padX:8,padY:3});
 
-    // Event log (bottom-left)
     const lw=THEME.log.w, lh=THEME.log.h;
     this.logPanel = this.add.rectangle(0,h-lh,lw,lh,THEME.panel.fill,0.82).setOrigin(0,0).setScrollFactor(0).setDepth(198);
     this.logPanelBorder = this.add.graphics().setScrollFactor(0).setDepth(199);
@@ -429,7 +617,6 @@ class WorldScene extends Phaser.Scene {
     this.logText    = this.add.text(10,h-lh+8,'',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.gold,wordWrap:{width:lw-20},lineSpacing:4,stroke:'#000',strokeThickness:1}).setScrollFactor(0).setDepth(201);
     this.terrainTip = this.add.text(10,h-14,'',{fontSize:THEME.font.xs,fontFamily:THEME.font.mono,color:THEME.text.muted}).setScrollFactor(0).setDepth(201);
 
-    // Minimap
     const mw=THEME.minimap.w, mh=THEME.minimap.h;
     const mx=w-mw-THEME.spacing.pad, my=h-mh-THEME.spacing.pad;
     this.minimapFrameGfx  = drawMinimapFrame(this,mx,my,mw,mh);
@@ -491,8 +678,8 @@ class WorldScene extends Phaser.Scene {
     for (let i=this._notifications.length-1; i>=0; i--) {
       const n = this._notifications[i];
       n.timer += dt;
-      if      (n.timer >= n.life)         { n.obj.destroy(); this._notifications.splice(i,1); }
-      else if (n.timer >= n.life-1.0)     { n.obj.setAlpha(Math.max(0, 1-(n.timer-(n.life-1.0)))); }
+      if      (n.timer >= n.life)        { n.obj.destroy(); this._notifications.splice(i,1); }
+      else if (n.timer >= n.life-1.0)    { n.obj.setAlpha(Math.max(0, 1-(n.timer-(n.life-1.0)))); }
     }
     this._notifications.forEach((n,i)=>{ n.obj.setPosition(w/2, THEME.hud.height+20+i*32); });
   }
@@ -548,10 +735,23 @@ class WorldScene extends Phaser.Scene {
 
   togglePause() { this.paused = !this.paused; }
 
-  // ---- Main update loop ----
+  // ---- Main loop ----
   update(time, delta) {
     this.updateHUD();
     this._tickNotifications(delta/1000);
+
+    // Keep tooltip position synced to moving NPC
+    if (this._hoveredNpc && this._tooltipObjs.length) {
+      const npc = this._hoveredNpc;
+      const cam = this.cameras.main;
+      const sx  = (npc.x - cam.worldView.x) * cam.zoom;
+      const sy  = (npc.y - cam.worldView.y) * cam.zoom - 14;
+      this._tooltipObjs[0].setPosition(
+        clamp(sx, this._tooltipObjs[0].width/2+4, cam.width-this._tooltipObjs[0].width/2-4),
+        clamp(sy, this._tooltipObjs[0].height+4, cam.height-4)
+      );
+    }
+
     if (this.activePanel || this.paused) return;
 
     const dt = (delta/1000) * this.gameSpeed;
@@ -580,9 +780,13 @@ class WorldScene extends Phaser.Scene {
       this.camTarget.x=this.playerPos.x; this.camTarget.y=this.playerPos.y;
     }
 
-    // NPC movement
+    // NPC movement + label update
     this.npcs.forEach(npc => {
-      if (!npc.alive) { npc.respawnTimer-=dt; if(npc.respawnTimer<=0) this.respawnNPC(npc); return; }
+      if (!npc.alive) {
+        npc.respawnTimer-=dt;
+        if (npc.respawnTimer<=0) this.respawnNPC(npc);
+        return;
+      }
       npc.retargetTimer-=dt;
       if (npc.retargetTimer<=0 || npc.path.length===0 || npc.pathIdx>=npc.path.length) this.npcRepath(npc);
       if (npc.path.length>0 && npc.pathIdx<npc.path.length) {
@@ -595,46 +799,326 @@ class WorldScene extends Phaser.Scene {
         if (d>2) { npc.x+=(tx-npc.x)/d*sp*dt; npc.y+=(ty-npc.y)/d*sp*dt; }
         else npc.pathIdx++;
       }
-      this.drawNPC(npc);
+
+      // Move graphics + label each frame (cheap)
+      npc.graphics.setPosition(npc.x, npc.y);
+      if (npc.labelTxt) npc.labelTxt.setPosition(npc.x, npc.y+8);
+      if (npc.hoverZone) npc.hoverZone.setPosition(npc.x, npc.y);
+
+      // Tick encounter cooldown
+      if (npc._encounterCooldown && npc._encounterCooldown > 0) npc._encounterCooldown -= dt;
       if (dist(npc,this.playerPos)<12) this.handleEncounter(npc);
     });
 
-    // NPC vs NPC battles
+    // NPC vs NPC
     for (let i=0; i<this.npcs.length; i++) { for (let j=i+1; j<this.npcs.length; j++) {
       const a=this.npcs[i], b=this.npcs[j];
       if (!a.alive||!b.alive||a.faction===b.faction) continue;
       if (a.type==='caravan'&&b.type==='caravan') continue;
+      if (a.type==='villager'||b.type==='villager') continue;  // villagers don't fight
       if (dist(a,b)<12) this.npcBattle(a,b);
     }}
 
     if (time%500 < 20) this.drawMinimap();
   }
 
+  isHostile(npc) {
+    return npc.faction === 'Bandit' || npc.type === 'bandit';
+  }
+
   handleEncounter(npc) {
-    if (npc.type==='bandit') {
-      this.paused=true;
-      const aC={troops:player.troops.map(t=>({...t})), skills:player.skills};
-      const dC={troops:npc.troops.map(t=>({...t}))};
-      const r=autoResolve(aC,dC); if(!r) return;
-      player.troops=aC.troops; npc.troops=dC.troops;
-      if (r.win) {
-        player.gold+=r.loot; player.xp+=r.dLoss*2; player.renown+=Math.max(1,Math.round(r.dLoss/2));
-        this.battleLog=`⚔ VICTORY vs ${npc.name}! Slain:${r.dLoss} Lost:${r.aLoss} Loot:${r.loot}g`;
-        npc.alive=false; npc.respawnTimer=25; this.drawNPC(npc);
-      } else {
-        player.gold=Math.max(0,player.gold-50);
-        this.battleLog=`💀 DEFEAT by ${npc.name}! Lost:${r.aLoss}`;
-        const near=this.towns.reduce((b,t)=>dist({x:t.x*TILE,y:t.y*TILE},this.playerPos)<dist({x:b.x*TILE,y:b.y*TILE},this.playerPos)?t:b, this.towns[0]);
-        this.playerPos.x=near.x*TILE+TILE/2; this.playerPos.y=near.y*TILE+TILE/2;
-        this.playerPath=[]; this.pathGfx.clear(); this.drawPlayer();
-        this.camTarget.x=this.playerPos.x; this.camTarget.y=this.playerPos.y;
-      }
-      this.logTimer=0; this.checkLevelUp();
-    } else if (npc.type==='lord') {
-      this.battleLog=`Met ${npc.name} (${npc.faction}).`; this.logTimer=0;
-    } else {
-      this.battleLog=`A ${npc.faction} caravan passes by.`; this.logTimer=0;
+    if (this.activePanel) return;
+    // Villagers: always silent, no interaction
+    if (npc.type === 'villager') return;
+    // Friendly/neutral: NEVER force a panel — player must click the sprite
+    if (!this.isHostile(npc)) return;
+    // Hostile: check cooldown so we don't re-fire while still overlapping
+    if (npc._encounterCooldown && npc._encounterCooldown > 0) return;
+    this.paused = true;
+    this.showEncounterPanel(npc);
+  }
+
+  // ---- ENCOUNTER PANEL ----
+  showEncounterPanel(npc) {
+    const hostile  = npc.faction === 'Bandit' || npc.type === 'bandit';
+    const pw = 520, ph = 420;
+    const {objs, cx, cy} = this.panelBg(pw, ph);
+    const d   = this.add.container(0,0).setScrollFactor(0).setDepth(301);
+    const tl  = cx - pw/2 + 24;
+    const top = cy - ph/2;
+
+    // ── Banner strip (faction colour) ──
+    const fc = THEME.faction[npc.faction] || 0x888888;
+    const banner = this.add.graphics().setScrollFactor(0).setDepth(301);
+    banner.fillStyle(fc, 0.18);
+    banner.fillRect(cx-pw/2+2, top+2, pw-4, 52);
+    objs.push(banner);
+
+    // ── Party portrait area (left) ──
+    const portG = this.add.graphics().setScrollFactor(0).setDepth(302);
+    portG.lineStyle(2, fc, 0.8);
+    portG.strokeRect(tl, top+14, 54, 54);
+    portG.fillStyle(fc, 0.22); portG.fillRect(tl+1, top+15, 53, 53);
+    // Draw party icon inside portrait
+    portG.fillStyle(fc, 0.9);
+    if (npc.type === 'lord')     { portG.fillRect(tl+16, top+26, 22, 22); portG.lineStyle(1.5,0xffd866,1); portG.strokeRect(tl+16, top+26, 22, 22); }
+    else if (npc.type === 'bandit') portG.fillCircle(tl+27, top+42, 11);
+    else { portG.fillTriangle(tl+27, top+26, tl+16, top+58, tl+38, top+58); }
+    objs.push(portG);
+
+    // ── Name & title ──
+    const nameStr = npc.lordDef ? npc.lordDef.name : npc.name;
+    const titleStr = npc.lordDef
+      ? `${npc.lordDef.title}  [${npc.faction}]`
+      : `${npc.type.charAt(0).toUpperCase()+npc.type.slice(1)}  [${npc.faction}]`;
+    d.add(this.add.text(tl+62, top+14, nameStr,  {fontSize:THEME.font.lg,  fontFamily:THEME.font.ui, color:THEME.text.gold, fontStyle:'bold'}));
+    d.add(this.add.text(tl+62, top+36, titleStr, {fontSize:THEME.font.xs,  fontFamily:THEME.font.ui, color:THEME.text.muted}));
+
+    // ── Enemy troop summary ──
+    let ey = top + 74;
+    d.add(this.add.text(tl, ey, 'Enemy Forces:', {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.muted})); ey += 18;
+    const inf = countKind(npc.troops,'infantry');
+    const cav = countKind(npc.troops,'cavalry');
+    const arc = countKind(npc.troops,'archer');
+    const vil = countKind(npc.troops,'villager');
+    const total = npc.troops.reduce((s,t)=>s+t.count,0);
+    const parts = [];
+    if (inf) parts.push(`Infantry ×${inf}`);
+    if (cav) parts.push(`Cavalry ×${cav}`);
+    if (arc) parts.push(`Archers ×${arc}`);
+    if (vil) parts.push(`Villagers ×${vil}`);
+    d.add(this.add.text(tl, ey, parts.join('   ') || 'Unknown', {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary})); ey += 18;
+
+    // Leader skills if lord
+    if (npc.lordDef) {
+      const ls = npc.lordDef.skills;
+      d.add(this.add.text(tl, ey,
+        `Tactics: ${ls.tactics}  Leadership: ${ls.leadership}  Speed: ${calcSpeed(npc.troops, npc.baseSpeed)}`,
+        {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+      ey += 18;
     }
+
+    // ── Divider ──
+    ey += 4;
+    const div = this.add.graphics().setScrollFactor(0).setDepth(302);
+    div.lineStyle(1, THEME.panel.border, 0.5);
+    div.lineBetween(tl, ey, cx+pw/2-24, ey);
+    objs.push(div); ey += 10;
+
+    // ── Win rate bar ──
+    const atkParty = { troops: player.troops, skills: player.skills };
+    const defParty = { troops: npc.troops, lordDef: npc.lordDef };
+    const winPct   = estimateWinRate(atkParty, defParty);
+    const winColor = winPct >= 65 ? THEME.text.green : winPct >= 40 ? THEME.text.gold : THEME.text.red;
+    const winLabel = winPct >= 70 ? 'Favourable' : winPct >= 50 ? 'Even' : winPct >= 30 ? 'Risky' : 'Desperate';
+
+    d.add(this.add.text(tl, ey, 'Estimated Win Chance:', {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+    d.add(this.add.text(tl+160, ey, `${winPct}%  (${winLabel})`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:winColor, fontStyle:'bold'}));
+    ey += 18;
+
+    // Win bar background
+    const barW = pw - 48, barH = 10;
+    const barBg = this.add.graphics().setScrollFactor(0).setDepth(302);
+    barBg.fillStyle(0x1a2030, 1); barBg.fillRect(tl, ey, barW, barH);
+    barBg.fillStyle(Phaser.Display.Color.HexStringToColor(winColor.replace('#','')).color, 0.85);
+    barBg.fillRect(tl, ey, Math.round(barW * winPct/100), barH);
+    barBg.lineStyle(1, THEME.panel.border, 0.5); barBg.strokeRect(tl, ey, barW, barH);
+    objs.push(barBg); ey += 22;
+
+    // Player force summary
+    const pInf = countKind(player.troops,'infantry');
+    const pCav = countKind(player.troops,'cavalry');
+    const pArc = countKind(player.troops,'archer');
+    const pVil = countKind(player.troops,'villager');
+    const pTotal = player.troops.reduce((s,t)=>s+t.count,0);
+    const pParts = [];
+    if (pInf) pParts.push(`Infantry ×${pInf}`);
+    if (pCav) pParts.push(`Cavalry ×${pCav}`);
+    if (pArc) pParts.push(`Archers ×${pArc}`);
+    if (pVil) pParts.push(`Villagers ×${pVil}`);
+    d.add(this.add.text(tl, ey, `Your Forces: ${pParts.join('  ')}  (Power: ${calcPower({troops:player.troops})})`,
+      {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+    ey += 22;
+
+    // ── Action buttons ──
+    const btnY  = top + ph - 68;
+    const btnW  = 100;
+    const gap   = 12;
+    let   btnX  = cx - pw/2 + 24;
+
+    if (!hostile) {
+      // Friendly/neutral: Trade | Rob | Social | Leave
+      d.add(createStyledButton(this, btnX, btnY, '📦  Trade',  ()=>{ this.closePanel(); this.showNotification('Trade — coming soon!'); this.paused=false; }, {depth:302,padX:12,padY:8})); btnX += btnW+gap;
+      d.add(createStyledButton(this, btnX, btnY, '⚔  Rob',    ()=>{ this.closePanel(); this.executeFight(npc); }, {depth:302,padX:12,padY:8})); btnX += btnW+gap;
+      d.add(createStyledButton(this, btnX, btnY, '💬  Social', ()=>{ this.closePanel(); this.showNotification('Social — coming soon!'); this.paused=false; }, {depth:302,padX:12,padY:8})); btnX += btnW+gap;
+      d.add(createStyledButton(this, btnX, btnY, '🚶  Leave',  ()=>{
+        this.closePanel();
+        npc._encounterCooldown = 8; // 8 sim-seconds grace period
+        this.paused = false;
+      }, {depth:302,padX:12,padY:8}));
+    } else {
+      // Hostile: Fight | Talk | Run
+      d.add(createStyledButton(this, btnX, btnY, '⚔  Fight',  ()=>{ this.closePanel(); this.executeFight(npc); }, {depth:302,padX:12,padY:8})); btnX += btnW+gap;
+      d.add(createStyledButton(this, btnX, btnY, '💬  Talk',   ()=>{ this.closePanel(); this.showNotification('Talk — coming soon!'); this.paused=false; }, {depth:302,padX:12,padY:8})); btnX += btnW+gap;
+      d.add(createStyledButton(this, btnX, btnY, '💨  Run',    ()=>{ this.closePanel(); this.executeRun(npc); }, {depth:302,padX:12,padY:8}));
+    }
+
+    objs.push(d);
+    this.activePanel = objs;
+  }
+
+  // ---- Execute Fight ----
+  executeFight(npc) {
+    const atkParty = { troops: player.troops.map(t=>({...t})), skills: player.skills };
+    const defParty = { troops: npc.troops.map(t=>({...t})), lordDef: npc.lordDef };
+    const r = autoResolveWithLeader(atkParty, defParty);
+    if (!r) { this.paused = false; return; }
+    player.troops = atkParty.troops;
+    npc.troops    = defParty.troops;
+
+    if (r.win) {
+      player.gold   += r.loot;
+      player.xp     += r.dLoss * 2;
+      player.renown += Math.max(1, Math.round(r.dLoss/2));
+      npc.alive       = false;
+      npc.respawnTimer= 25;
+      this.drawNPC(npc);
+      this.showBattleResultPanel(true, r, npc);
+    } else {
+      player.gold = Math.max(0, player.gold - 50);
+      const near = this.towns.reduce((b,t) =>
+        dist({x:t.x*TILE,y:t.y*TILE},this.playerPos) < dist({x:b.x*TILE,y:b.y*TILE},this.playerPos) ? t : b,
+        this.towns[0]);
+      this.playerPos.x = near.x*TILE+TILE/2;
+      this.playerPos.y = near.y*TILE+TILE/2;
+      this.playerPath = []; this.pathGfx.clear(); this.drawPlayer();
+      this.camTarget.x = this.playerPos.x; this.camTarget.y = this.playerPos.y;
+      this.showBattleResultPanel(false, r, npc);
+    }
+    this.checkLevelUp();
+  }
+
+  // ---- Execute Run ----
+  executeRun(npc) {
+    const playerSpd = calcSpeed(player.troops, 80);
+    const npcSpd    = calcSpeed(npc.troops, npc.baseSpeed);
+    const escaped   = playerSpd >= npcSpd || Math.random() < 0.55;
+
+    // Rear-guard losses — weakest troops sacrificed
+    const rearLossRatio = escaped ? 0.06 : 0.18;
+    const total = player.troops.reduce((s,t)=>s+t.count,0);
+    let rem = Math.max(1, Math.round(total * rearLossRatio));
+    const sorted = [...player.troops].sort((a,b)=>(TROOP_BY_ID[a.id]?.power??1)-(TROOP_BY_ID[b.id]?.power??1));
+    for (let i=0; i<sorted.length && rem>0; i++) {
+      const k = Math.min(sorted[i].count, rem); sorted[i].count -= k; rem -= k;
+    }
+    player.troops = player.troops.filter(t=>t.count>0);
+
+    const rearLoss = Math.max(1, Math.round(total * rearLossRatio));
+    this.showRunResultPanel(escaped, rearLoss, npc);
+
+    if (escaped) {
+      // Move player away from npc
+      const dx = this.playerPos.x - npc.x, dy = this.playerPos.y - npc.y;
+      const d  = Math.sqrt(dx*dx+dy*dy) || 1;
+      const nx = clamp(Math.floor((this.playerPos.x + dx/d*60)/TILE), 0, GRID_W-1);
+      const ny = clamp(Math.floor((this.playerPos.y + dy/d*60)/TILE), 0, GRID_H-1);
+      if (this.costGrid[ny*GRID_W+nx] < 999) {
+        this.playerPos.x = nx*TILE+TILE/2;
+        this.playerPos.y = ny*TILE+TILE/2;
+        this.drawPlayer();
+        this.camTarget.x = this.playerPos.x;
+        this.camTarget.y = this.playerPos.y;
+      }
+    }
+  }
+
+  // ---- Battle Result Panel ----
+  showBattleResultPanel(win, r, npc) {
+    const pw = 420, ph = 300;
+    const {objs, cx, cy} = this.panelBg(pw, ph);
+    const d  = this.add.container(0,0).setScrollFactor(0).setDepth(301);
+    const tl = cx - pw/2 + 28, top = cy - ph/2;
+
+    const titleStr  = win ? '⚔  VICTORY!' : '💀  DEFEATED';
+    const titleCol  = win ? THEME.text.green : THEME.text.red;
+    d.add(this.add.text(cx, top+18, titleStr, {fontSize:THEME.font.xl, fontFamily:THEME.font.ui, color:titleCol, fontStyle:'bold', stroke:'#000', strokeThickness:3}).setOrigin(0.5,0));
+
+    let gy = top + 58;
+    const enemy = npc.lordDef ? npc.lordDef.name : npc.name;
+
+    if (win) {
+      d.add(this.add.text(tl, gy, `You defeated ${enemy}'s forces.`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary})); gy+=20;
+      d.add(this.add.text(tl, gy, `Enemy slain:   ${r.dLoss}`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary})); gy+=18;
+      d.add(this.add.text(tl, gy, `Your losses:   ${r.aLoss}`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary})); gy+=18;
+      if (r.loot > 0) { d.add(this.add.text(tl, gy, `Gold looted:   ${r.loot}g`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.gold})); gy+=18; }
+      const xp = r.dLoss*2;
+      d.add(this.add.text(tl, gy, `XP gained:     ${xp}   Renown +${Math.max(1,Math.round(r.dLoss/2))}`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.gold}));
+    } else {
+      d.add(this.add.text(tl, gy, `${enemy}'s forces crushed you.`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary})); gy+=20;
+      d.add(this.add.text(tl, gy, `Your losses:   ${r.aLoss}`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.red})); gy+=18;
+      d.add(this.add.text(tl, gy, `Gold lost:     50g`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.red})); gy+=18;
+      d.add(this.add.text(tl, gy, `Retreated to nearest town.`, {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+    }
+
+    // Remaining troops
+    gy = top + ph - 72;
+    const pTot = player.troops.reduce((s,t)=>s+t.count,0);
+    d.add(this.add.text(tl, gy, `Remaining troops: ${pTot}`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.muted})); gy+=18;
+
+    const contBtn = createStyledButton(this, cx, gy+8, 'Continue →', ()=>{
+      this.closePanel();
+      this.paused = false;
+      this.logTimer = 0;
+      this.battleLog = win
+        ? `⚔ VICTORY vs ${enemy}! Slain:${r.dLoss} Lost:${r.aLoss} Loot:${r.loot}g`
+        : `💀 DEFEAT by ${enemy}! Lost:${r.aLoss}`;
+    }, {depth:302, padX:20, padY:8});
+    contBtn.setOrigin(0.5, 0);
+    d.add(contBtn);
+
+    objs.push(d);
+    this.activePanel = objs;
+  }
+
+  // ---- Run Result Panel ----
+  showRunResultPanel(escaped, rearLoss, npc) {
+    const pw = 380, ph = 240;
+    const {objs, cx, cy} = this.panelBg(pw, ph);
+    const d  = this.add.container(0,0).setScrollFactor(0).setDepth(301);
+    const tl = cx - pw/2 + 28, top = cy - ph/2;
+
+    const titleStr = escaped ? '💨  Escaped!' : '💨  Failed to Flee!';
+    const titleCol = escaped ? THEME.text.gold : THEME.text.red;
+    d.add(this.add.text(cx, top+18, titleStr, {fontSize:THEME.font.xl, fontFamily:THEME.font.ui, color:titleCol, fontStyle:'bold', stroke:'#000', strokeThickness:3}).setOrigin(0.5,0));
+
+    let gy = top + 58;
+    const enemy = npc.lordDef ? npc.lordDef.name : npc.name;
+    if (escaped) {
+      d.add(this.add.text(tl, gy, `You broke away from ${enemy}.`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary})); gy+=20;
+    } else {
+      d.add(this.add.text(tl, gy, `${enemy} was too fast — you couldn't escape.`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary})); gy+=20;
+    }
+    d.add(this.add.text(tl, gy, `Rearguard lost: ${rearLoss} troops`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.red})); gy+=22;
+    if (!escaped) {
+      d.add(this.add.text(tl, gy, `You were forced to fight!`, {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted})); gy+=18;
+    }
+
+    const contBtn = createStyledButton(this, cx, top+ph-52, escaped ? 'Continue →' : 'Fight →', ()=>{
+      this.closePanel();
+      if (!escaped) {
+        this.executeFight(npc);
+      } else {
+        this.paused = false;
+        this.battleLog = `💨 Fled from ${enemy}, lost ${rearLoss} rearguard.`;
+        this.logTimer = 0;
+      }
+    }, {depth:302, padX:20, padY:8});
+    contBtn.setOrigin(0.5, 0);
+    d.add(contBtn);
+
+    objs.push(d);
+    this.activePanel = objs;
   }
 
   npcBattle(a, b) {
@@ -649,15 +1133,21 @@ class WorldScene extends Phaser.Scene {
     let gx,gy;
     do { gx=randInt(10,GRID_W-10); gy=randInt(10,GRID_H-10); } while(this.costGrid[gy*GRID_W+gx]>=999);
     npc.x=gx*TILE+TILE/2; npc.y=gy*TILE+TILE/2; npc.alive=true; npc.path=[]; npc.pathIdx=0;
-    if      (npc.type==='bandit')  npc.troops=[{tier:0,count:randInt(5,18)},{tier:1,count:randInt(0,6)}];
-    else if (npc.type==='lord')    npc.troops=[{tier:1,count:randInt(10,18)},{tier:2,count:randInt(4,9)},{tier:3,count:randInt(1,4)}];
-    else                           npc.troops=[{tier:0,count:randInt(3,7)},{tier:1,count:randInt(1,3)}];
+    switch (npc.type) {
+      case 'bandit':   npc.troops = banditTroops();   break;
+      case 'lord':     npc.troops = npc.lordDef ? npc.lordDef.troops.map(t=>({...t})) : lordTroops(); break;
+      case 'villager': npc.troops = villagerTroops();  break;
+      default:         npc.troops = caravanTroops();   break;
+    }
     this.drawNPC(npc);
   }
 
   dailyTick() {
     let wages=0;
-    player.troops.forEach(t => { wages += t.count * TROOP_TIERS[t.tier].wage; });
+    player.troops.forEach(t => {
+      const def = TROOP_BY_ID[t.id];
+      if (def) wages += t.count * def.wage;
+    });
     player.gold -= wages;
     if (player.gold < 0) {
       player.troops.forEach(t => { t.count = Math.max(0, t.count - Math.ceil(t.count*0.1)); });
@@ -705,59 +1195,78 @@ class WorldScene extends Phaser.Scene {
     const d = this.add.container(0,0).setScrollFactor(0).setDepth(301);
     const tl = cx-pw/2+20, tr = cy-ph/2;
     d.add(this.add.text(tl,tr+12,`${town.name} [${town.faction}]`,{fontSize:THEME.font.lg,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}));
-    d.add(this.add.text(tl,tr+38,`Tier: ${['Village','Town','City'][town.tier||0]}  Recruit Pool: ${town.recruitPool}`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
-    // Trade goods
+    d.add(this.add.text(tl,tr+38,`${['Village','Town','City'][town.tier||0]}  ·  Recruits available: ${town.recruitPool}`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
     let gy2=tr+65;
+
+    // Trade
     d.add(this.add.text(tl,gy2,'— Trade —',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy2+=20;
     GOODS.forEach(good => {
       const stock=town.goods[good]; const price=Math.round(10+50/Math.max(1,stock));
-      const row=this.add.text(tl,gy2,`${good}: stock ${stock}  buy ${price}g`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary});
-      d.add(row); gy2+=18;
-      const btn = createStyledButton(this, tl+220, gy2-18, 'Buy 1', ()=>{
+      d.add(this.add.text(tl,gy2,`${good}: stock ${stock}  buy ${price}g`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
+      const btn = createStyledButton(this, tl+220, gy2, 'Buy 1', ()=>{
         if (player.gold<price) { this.showNotification('Not enough gold!'); return; }
         player.gold-=price; player.inventory[good]=(player.inventory[good]||0)+1;
         town.goods[good]=Math.max(0,town.goods[good]-1);
         this.showNotification(`Bought ${good} for ${price}g`);
       }, {depth:302,padX:6,padY:2});
-      d.add(btn);
+      d.add(btn); gy2+=20;
     });
-    // Recruit
-    gy2+=10;
-    d.add(this.add.text(tl,gy2,'— Recruit —',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy2+=20;
-    TROOP_TIERS.forEach((tier,ti) => {
-      const btn = createStyledButton(this, tl+(ti*96), gy2, `${tier.name} ${tier.cost}g`, ()=>{
-        if (town.recruitPool<=0) { this.showNotification('No recruits available!'); return; }
-        if (player.gold<tier.cost) { this.showNotification('Not enough gold!'); return; }
-        player.gold-=tier.cost; town.recruitPool--;
-        const existing=player.troops.find(t=>t.tier===ti);
-        if (existing) existing.count++; else player.troops.push({tier:ti,count:1});
-        this.showNotification(`Recruited ${tier.name}`);
-      }, {depth:302,padX:4,padY:2});
-      d.add(btn);
-    });
+
+    // Recruit — towns/villages only provide Villagers
+    gy2+=8;
+    d.add(this.add.text(tl,gy2,'— Recruit —',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy2+=18;
+    d.add(this.add.text(tl,gy2,'Towns recruit Villagers only. Train them in the field.',{fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy2+=16;
+
+    const villagerDef = TROOP_BY_ID[0];
+    const btn = createStyledButton(this, tl, gy2, `Recruit Villager  (${villagerDef.cost}g)`, ()=>{
+      if (town.recruitPool<=0) { this.showNotification('No recruits available!'); return; }
+      if (player.gold<villagerDef.cost) { this.showNotification('Not enough gold!'); return; }
+      player.gold -= villagerDef.cost; town.recruitPool--;
+      const existing = player.troops.find(t=>t.id===0);
+      if (existing) existing.count++; else player.troops.push({id:0,count:1});
+      this.showNotification(`Recruited a Villager`);
+    }, {depth:302,padX:8,padY:4});
+    d.add(btn);
+
     objs.push(d);
     this.activePanel = objs;
   }
 
   showPartyPanel() {
     if (this.activePanel) return;
-    const pw=360, ph=280;
+    const pw=400, ph=320;
     const {objs,cx,cy} = this.panelBg(pw,ph);
     const d=this.add.container(0,0).setScrollFactor(0).setDepth(301);
     const tl=cx-pw/2+20, tr=cy-ph/2;
-    d.add(this.add.text(tl,tr+12,'Party',{fontSize:THEME.font.lg,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}));
+    d.add(this.add.text(tl,tr+12,'Your Party',{fontSize:THEME.font.lg,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}));
     let gy2=tr+42;
     d.add(this.add.text(tl,gy2,`Gold: ${player.gold}   Power: ${calcPower(player)}   Renown: ${player.renown}   Lv${player.level}`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary})); gy2+=22;
-    d.add(this.add.text(tl,gy2,'Troops:',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy2+=18;
+
+    // Summary by kind
+    const inf = countKind(player.troops,'infantry');
+    const cav = countKind(player.troops,'cavalry');
+    const arc = countKind(player.troops,'archer');
+    const vil = countKind(player.troops,'villager');
+    d.add(this.add.text(tl,gy2,`Infantry: ${inf}   Cavalry: ${cav}   Archers: ${arc}   Villagers: ${vil}`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary})); gy2+=20;
+
+    // Wages
+    let wages=0; player.troops.forEach(t=>{const def=TROOP_BY_ID[t.id];if(def)wages+=t.count*def.wage;});
+    d.add(this.add.text(tl,gy2,`Daily wages: ${wages}g`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy2+=20;
+
+    d.add(this.add.text(tl,gy2,'Troops:',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy2+=16;
     player.troops.forEach(t => {
-      const tier=TROOP_TIERS[t.tier];
-      d.add(this.add.text(tl,gy2,`  ${tier.name} ×${t.count}   wage/day: ${t.count*tier.wage}g`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
-      gy2+=18;
+      const def = TROOP_BY_ID[t.id];
+      if (!def) return;
+      const kindLabel = def.kind.charAt(0).toUpperCase()+def.kind.slice(1);
+      d.add(this.add.text(tl,gy2,`  [${kindLabel}] ${def.name} ×${t.count}   ${t.count*def.wage}g/day`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
+      gy2+=16;
     });
-    d.add(this.add.text(tl,gy2,'Skills:',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy2+=18;
+
+    gy2+=4;
+    d.add(this.add.text(tl,gy2,'Skills:',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy2+=16;
     Object.entries(player.skills).forEach(([k,v]) => {
       d.add(this.add.text(tl,gy2,`  ${k}: ${v}`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
-      gy2+=16;
+      gy2+=14;
     });
     objs.push(d);
     this.activePanel=objs;
@@ -773,8 +1282,7 @@ class WorldScene extends Phaser.Scene {
     let gy2=tr+42;
     GOODS.forEach(good => {
       const qty=player.inventory[good]||0;
-      const row=this.add.text(tl,gy2,`${good}: ${qty}`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary});
-      d.add(row);
+      d.add(this.add.text(tl,gy2,`${good}: ${qty}`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
       if (qty>0) {
         const sell = createStyledButton(this, tl+180, gy2, 'Sell 1', ()=>{
           const price=Math.round(12+Math.random()*10);
@@ -796,12 +1304,12 @@ class WorldScene extends Phaser.Scene {
     const d=this.add.container(0,0).setScrollFactor(0).setDepth(301);
     const tl=cx-pw/2+20, tr=cy-ph/2;
     d.add(this.add.text(cx,tr+18,'⭐ Level Up!',{fontSize:THEME.font.xl,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}).setOrigin(0.5,0));
-    d.add(this.add.text(cx,tr+50,`You are now Level ${player.level}. Choose a skill to improve:`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}).setOrigin(0.5,0));
+    d.add(this.add.text(cx,tr+50,`Level ${player.level} — choose a skill:`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}).setOrigin(0.5,0));
     let bx2=cx-160;
     Object.keys(player.skills).forEach(skill => {
       const btn=createStyledButton(this,bx2,tr+90,`+${skill}`,()=>{
         player.skills[skill]++;
-        this.showNotification(`${skill} increased to ${player.skills[skill]}!`);
+        this.showNotification(`${skill} → ${player.skills[skill]}`);
         this.closePanel();
       },{depth:302,padX:10,padY:5});
       d.add(btn); bx2+=85;

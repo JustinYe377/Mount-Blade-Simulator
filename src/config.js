@@ -32,13 +32,38 @@ const FACTION_COLORS = {
   Bandit:  0x998844,
 };
 
-// --- Troop tiers ---
+// --- Troop definitions ---
+// kind: 'villager' | 'infantry' | 'cavalry' | 'archer'
+// Combat triangle: infantry beats cavalry, archer beats infantry, cavalry beats archer
+// Villagers are neutral — no triangle interaction
 const TROOP_TIERS = [
-  { name:'Militia',  power:1,  wage:1,  cost:10  },
-  { name:'Footman',  power:3,  wage:3,  cost:30  },
-  { name:'Veteran',  power:6,  wage:6,  cost:70  },
-  { name:'Knight',   power:12, wage:12, cost:150 },
+  // Villager — base recruit for all factions
+  { id:0, kind:'villager', tier:0, name:'Villager',        power:1,  wage:1,  cost:10  },
+  // Infantry line
+  { id:1, kind:'infantry', tier:1, name:'Militia',         power:3,  wage:2,  cost:20  },
+  { id:2, kind:'infantry', tier:2, name:'Footman',         power:7,  wage:5,  cost:50  },
+  { id:3, kind:'infantry', tier:3, name:'Man-at-Arms',     power:15, wage:10, cost:110 },
+  // Cavalry line
+  { id:4, kind:'cavalry',  tier:1, name:'Scout Cavalry',   power:4,  wage:3,  cost:30  },
+  { id:5, kind:'cavalry',  tier:2, name:'Light Cavalry',   power:9,  wage:7,  cost:70  },
+  { id:6, kind:'cavalry',  tier:3, name:'Knight',          power:20, wage:14, cost:160 },
+  // Archer line
+  { id:7, kind:'archer',   tier:1, name:'Archer',          power:3,  wage:2,  cost:20  },
+  { id:8, kind:'archer',   tier:2, name:'Trained Archer',  power:7,  wage:5,  cost:55  },
+  { id:9, kind:'archer',   tier:3, name:'Longbowman',      power:14, wage:10, cost:120 },
 ];
+
+// Fast O(1) lookup: TROOP_BY_ID[id] → troop def
+const TROOP_BY_ID = {};
+TROOP_TIERS.forEach(t => { TROOP_BY_ID[t.id] = t; });
+
+// Combat triangle — attacker.kind vs defender.kind multiplier
+const COMBAT_TRIANGLE = {
+  infantry: { cavalry:1.35, infantry:1.0, archer:0.75,  villager:1.0 },
+  cavalry:  { archer: 1.35, cavalry: 1.0, infantry:0.75, villager:1.0 },
+  archer:   { infantry:1.35,archer:  1.0, cavalry: 0.75, villager:1.0 },
+  villager: { infantry:1.0, cavalry: 1.0, archer:  1.0,  villager:1.0 },
+};
 
 // --- Economy ---
 const GOODS = ['grain', 'iron', 'cloth', 'fish'];
