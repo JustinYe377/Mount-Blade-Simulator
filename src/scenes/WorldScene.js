@@ -103,23 +103,27 @@ class WorldScene extends Phaser.Scene {
     this.activePanel  = null;
     this.gameSpeed    = 1;
 
-    // Terrain
+    // Settlement safe zone state
+    this.playerInside     = false;
+    this.playerInsideSett = null;
+    this.stayMode         = false;
+
+    // Terrain + settlements
     this.terrainGrid = new Uint8Array(GRID_W * GRID_H);
     this.costGrid    = new Float32Array(GRID_W * GRID_H);
     this.generateTerrain();
+    this.loadSettlements();
+    this.ensureSettlementsPassable();
     this.renderTerrain();
-
-    // Towns
-    this.towns = this.placeTowns(8);
     this.renderTerrainOverlays();
-    this.drawTowns();
+    this.drawSettlements();
 
     // Pathfinder
     this.pathfinder = new AStar(this.costGrid, GRID_W, GRID_H);
 
-    // Player sprite
+    // Player sprite — start at Highcourt (Varric League capital)
     this.playerGfx = this.add.graphics().setDepth(50);
-    const st = this.towns[0];
+    const st = this.towns.find(t => t.id === 'highcourt') || this.towns[0];
     this.playerPos  = { x: st.x*TILE+TILE/2, y: st.y*TILE+TILE/2 };
     this.playerPath = [];
     this.playerPathIdx = 0;
@@ -141,6 +145,7 @@ class WorldScene extends Phaser.Scene {
     // Click to move
     this.input.on('pointerdown', (ptr) => {
       if (this.activePanel) return;
+      if (this.playerInside) return;
       if (ptr.y < THEME.hud.height + 4) return;
       const wx = ptr.worldX, wy = ptr.worldY;
       const gx = clamp(Math.floor(wx/TILE), 0, GRID_W-1);
@@ -158,16 +163,19 @@ class WorldScene extends Phaser.Scene {
     // NPCs
     this.npcs = [];
 
-    // Spawn static Lords — distribute across towns by faction
+    // Spawn static Lords — distribute across towns/castles (tier≥1) by faction
     const factionTowns = {};
-    this.towns.forEach(t => { (factionTowns[t.faction] = factionTowns[t.faction]||[]).push(t); });
+    this.towns.filter(t => t.tier >= 1).forEach(t => { (factionTowns[t.faction] = factionTowns[t.faction]||[]).push(t); });
 
     LORD_DEFS.forEach(lordDef => {
-      const pool = factionTowns[lordDef.faction] || this.towns;
-      const t    = randPick(pool);
-      const npc  = this.spawnNPC(lordDef.name, lordDef.faction, t.x, t.y, 'lord',
-                                  lordDef.troops.map(tr => ({...tr})), lordDef.name);
-      npc.lordDef = lordDef;  // attach static lord data
+      const pool     = factionTowns[lordDef.faction] || this.towns.filter(t=>t.tier>=1);
+      const homeTown = randPick(pool.length ? pool : this.towns);
+      const npc      = this.spawnNPC(lordDef.name, lordDef.faction, homeTown.x, homeTown.y, 'lord',
+                                     lordDef.troops.map(tr => ({...tr})), lordDef.name);
+      npc.lordDef    = lordDef;
+      npc.homeTown   = homeTown;       // preferred base
+      npc.lordState  = 'patrol';       // 'patrol'|'recruit'|'defend'|'attack'
+      npc.lordTarget = null;           // NPC or town object when defending/attacking
     });
 
     for (let i=0; i<8; i++) {
@@ -176,12 +184,24 @@ class WorldScene extends Phaser.Scene {
       while (this.costGrid[gy*GRID_W+gx] >= 999);
       this.spawnNPC('Bandits', 'Bandit', gx, gy, 'bandit', banditTroops(), 'Bandits');
     }
-    for (let i=0; i<4; i++) {
-      const t = randPick(this.towns);
-      this.spawnNPC(`${t.faction} Caravan`, t.faction, t.x, t.y, 'caravan', caravanTroops(), t.name);
-    }
-    this.towns.filter(t => t.tier===0).forEach(t => {
-      this.spawnNPC(`${t.name} Villagers`, t.faction, t.x, t.y, 'villager', villagerTroops(), t.name);
+
+    // Caravans — one per type='town' settlement (not castles, not villages)
+    this.towns.filter(t => t.type === 'town').forEach(homeTown => {
+      const npc = this.spawnNPC(`${homeTown.faction} Caravan`, homeTown.faction,
+                                homeTown.x, homeTown.y, 'caravan', caravanTroops(), homeTown.name);
+      npc.homeTown = homeTown;
+      npc.destTown = randPick(this.towns.filter(t => t !== homeTown && t.type === 'town'));
+      npc.cargo    = this._caravanLoadCargo(homeTown);
+    });
+
+    // Villager parties — one per village, bound to their town
+    this.towns.filter(t => t.type === 'village').forEach(village => {
+      const npc = this.spawnNPC(`${village.name} Villagers`, village.faction,
+                                village.x, village.y, 'villager', villagerTroops(), village.name);
+      npc.homeTown   = village;
+      npc.destTown   = village.boundTown;
+      npc.delivering = true;           // true = heading to boundTown; false = returning home
+      npc.cargo      = this._villagerLoadCargo(village);
     });
 
     // HUD
@@ -229,6 +249,57 @@ class WorldScene extends Phaser.Scene {
       this.terrainGrid[idx] = terrain.id;
       this.costGrid[idx]    = terrain.cost;
     }}
+
+    // ── Biome overrides ──────────────────────────────────────
+    // Grayspine Mountain ridge: x=87..105
+    // Passes: Crown Pass y=72–88, Southgate Pass y=129–145
+    for (let y=0; y<GRID_H; y++) {
+      for (let x=87; x<=105; x++) {
+        const idx = y*GRID_W+x;
+        const inCrownPass     = y>=72  && y<=88;
+        const inSouthgatePass = y>=129 && y<=145;
+        if (inCrownPass || inSouthgatePass) {
+          if (this.terrainGrid[idx]===TERRAIN.MOUNTAIN.id || this.terrainGrid[idx]===TERRAIN.SNOW.id ||
+              this.terrainGrid[idx]<=TERRAIN.WATER.id) {
+            this.terrainGrid[idx] = TERRAIN.HILLS.id;
+            this.costGrid[idx]    = TERRAIN.HILLS.cost;
+          }
+        } else {
+          this.terrainGrid[idx] = TERRAIN.MOUNTAIN.id;
+          this.costGrid[idx]    = TERRAIN.MOUNTAIN.cost;
+        }
+      }
+    }
+
+    // SE desert zone: x>135, y>126 — replace water/mountains/forest with sand/grass
+    for (let y=127; y<GRID_H; y++) {
+      for (let x=135; x<GRID_W; x++) {
+        const idx = y*GRID_W+x;
+        const t = this.terrainGrid[idx];
+        if (this.costGrid[idx]>=999 || t===TERRAIN.FOREST.id || t===TERRAIN.DENSE_FOREST.id || t===TERRAIN.SNOW.id) {
+          this.terrainGrid[idx] = TERRAIN.SAND.id;
+          this.costGrid[idx]    = TERRAIN.SAND.cost;
+        } else if (t===TERRAIN.HILLS.id) {
+          this.terrainGrid[idx] = TERRAIN.GRASS.id;
+          this.costGrid[idx]    = TERRAIN.GRASS.cost;
+        }
+      }
+    }
+
+    // Northern cold highlands: y<30 — push snow thresholds lower
+    for (let y=0; y<30; y++) {
+      for (let x=0; x<GRID_W; x++) {
+        const idx = y*GRID_W+x;
+        const t = this.terrainGrid[idx];
+        if (t===TERRAIN.HILLS.id || t===TERRAIN.GRASS.id) {
+          const snowBias = (30-y)/30;
+          if (Math.random() < snowBias*0.5) {
+            this.terrainGrid[idx] = TERRAIN.SNOW.id;
+            this.costGrid[idx]    = TERRAIN.SNOW.cost;
+          }
+        }
+      }
+    }
   }
 
   renderTerrain() {
@@ -277,58 +348,53 @@ class WorldScene extends Phaser.Scene {
         g.fillStyle(0xffffff,0.14); g.fillRect(x*TILE, y*TILE, TILE, 2);
       }
     }}
-    // Roads
-    const drawn = new Set();
-    this.towns.forEach((a,ai) => {
-      const conns = a.tier===2?3 : a.tier===1?2 : 1;
-      const sorted = this.towns
-        .map((b,bi) => ({b,bi,d:Math.hypot(b.x-a.x,b.y-a.y)}))
-        .filter(({bi}) => bi!==ai)
-        .sort((p,q) => p.d-q.d)
-        .slice(0, conns);
-      sorted.forEach(({b,bi}) => {
-        const key = Math.min(ai,bi)+','+Math.max(ai,bi);
-        if (drawn.has(key)) return; drawn.add(key);
-        const path = roadAStar(this.terrainGrid, a.x,a.y,b.x,b.y);
-        if (!path || path.length<2) return;
-        const sparse = path.filter((_,i) => i%3===0 || i===path.length-1);
-        const smooth = chaikinSmooth(sparse, 2);
-        g.lineStyle(1.5, 0xc8a050, 0.30);
-        g.beginPath();
-        smooth.forEach((p,i) => {
-          const px=p.x*TILE+TILE/2, py=p.y*TILE+TILE/2;
-          if (i===0) g.moveTo(px,py); else g.lineTo(px,py);
-        });
-        g.strokePath();
+    // Roads — draw static ROAD_CONNECTIONS pairs
+    ROAD_CONNECTIONS.forEach(([idA, idB]) => {
+      const a = SETTLEMENTS_BY_ID[idA];
+      const b = SETTLEMENTS_BY_ID[idB];
+      if (!a || !b) return;
+      const path = roadAStar(this.terrainGrid, a.x, a.y, b.x, b.y);
+      if (!path || path.length<2) return;
+      const sparse = path.filter((_,i) => i%3===0 || i===path.length-1);
+      const smooth = chaikinSmooth(sparse, 2);
+      g.lineStyle(1.5, 0xc8a050, 0.30);
+      g.beginPath();
+      smooth.forEach((p,i) => {
+        const px=p.x*TILE+TILE/2, py=p.y*TILE+TILE/2;
+        if (i===0) g.moveTo(px,py); else g.lineTo(px,py);
       });
+      g.strokePath();
     });
     rt.draw(g); g.destroy();
   }
 
-  placeTowns(count) {
-    const names    = ['Riverholt','Ashford','Thornwall','Dustmere','Frostpeak','Goldmere','Crestfall','Windhaven'];
-    const factions = ['Kingdom','Kingdom','Kingdom','Empire','Empire','Empire','Rebels','Rebels'];
-    const tiers    = [2,1,1,2,1,1,0,0];
-    const towns=[]; const minD=35;
-    for (let i=0; i<count; i++) {
-      let att=0, gx, gy;
-      do {
-        gx=randInt(20,GRID_W-20); gy=randInt(20,GRID_H-20); att++;
-      } while (att<500 && (
-        this.costGrid[gy*GRID_W+gx]>=999 ||
-        this.terrainGrid[gy*GRID_W+gx]===TERRAIN.SAND.id ||
-        towns.some(t => Math.abs(t.x-gx)+Math.abs(t.y-gy)<minD)
-      ));
-      towns.push({
-        name: names[i], x: gx, y: gy, faction: factions[i], tier: tiers[i]||0,
-        goods: { grain:randInt(8,30), iron:randInt(10,55), cloth:randInt(10,40), fish:randInt(5,35) },
-        recruitPool: randInt(5,12),
-      });
-    }
-    return towns;
+  loadSettlements() {
+    // Deep-copy settlement data so we don't mutate the static arrays
+    this.towns = SETTLEMENTS_DATA.map(s => ({ ...s, goods: { ...s.goods } }));
+    // Resolve boundTownId string → live object reference
+    this.towns.forEach(s => {
+      s.boundTown = s.boundTownId ? (this.towns.find(t => t.id === s.boundTownId) || null) : null;
+    });
   }
 
-  drawTowns() {
+  ensureSettlementsPassable() {
+    // Force a 3×3 passable patch around each settlement so they are never on water/mountain
+    this.towns.forEach(s => {
+      for (let dy=-1; dy<=1; dy++) {
+        for (let dx=-1; dx<=1; dx++) {
+          const nx = clamp(s.x+dx, 0, GRID_W-1);
+          const ny = clamp(s.y+dy, 0, GRID_H-1);
+          const idx = ny*GRID_W+nx;
+          if (this.costGrid[idx] >= 999) {
+            this.terrainGrid[idx] = TERRAIN.GRASS.id;
+            this.costGrid[idx]    = TERRAIN.GRASS.cost;
+          }
+        }
+      }
+    });
+  }
+
+  drawSettlements() {
     this.towns.forEach(t => {
       const px=t.x*TILE+TILE/2, py=t.y*TILE+TILE/2;
       const fc   = THEME.faction[t.faction] || 0x888888;
@@ -337,6 +403,7 @@ class WorldScene extends Phaser.Scene {
       const g     = this.add.graphics().setDepth(30);
 
       if (tier===0) {
+        // Village — small humble square
         g.fillStyle(fc,0.12); g.fillCircle(px,py,7);
         g.fillStyle(0xb8a070); g.fillRect(px-3,py-3,7,7);
         g.lineStyle(1,fc,0.65); g.strokeRect(px-3,py-3,7,7);
@@ -344,8 +411,26 @@ class WorldScene extends Phaser.Scene {
         const zone = this.add.zone(px,py,16,16).setInteractive({useHandCursor:true}).setDepth(55);
         zone.on('pointerover',()=>{hover.clear();hover.fillStyle(0xffffff,0.10);hover.fillCircle(px,py,9);});
         zone.on('pointerout', ()=>hover.clear());
-        zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterTown(t);});
+        zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterSettlement(t);});
+      } else if (t.type === 'castle') {
+        // Castle — square keep with 4 corner towers
+        g.fillStyle(fc,0.15); g.fillCircle(px,py,13);
+        g.fillStyle(0xb8a070); g.fillRect(px-5,py-5,11,11);       // keep body
+        g.fillStyle(0x8a7050);                                       // corner towers
+        g.fillRect(px-8,py-8,5,5); g.fillRect(px+3,py-8,5,5);
+        g.fillRect(px-8,py+3,5,5); g.fillRect(px+3,py+3,5,5);
+        g.lineStyle(1.5,fc,0.85); g.strokeRect(px-5,py-5,11,11);
+        g.lineStyle(1,fc,0.65);
+        g.strokeRect(px-8,py-8,5,5); g.strokeRect(px+3,py-8,5,5);
+        g.strokeRect(px-8,py+3,5,5); g.strokeRect(px+3,py+3,5,5);
+        g.fillStyle(0x1a1208); g.fillRect(px-1,py+1,3,4);          // gate
+        this.add.text(px,py+10,t.name,{fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted,stroke:'#000',strokeThickness:1}).setOrigin(0.5,0).setDepth(31);
+        const zone = this.add.zone(px,py,28,28).setInteractive({useHandCursor:true}).setDepth(55);
+        zone.on('pointerover',()=>{hover.clear();hover.fillStyle(0xffffff,0.12);hover.fillCircle(px,py,15);});
+        zone.on('pointerout', ()=>hover.clear());
+        zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterSettlement(t);});
       } else if (tier===1) {
+        // Town — castle walls with 3 merlons
         g.fillStyle(fc,0.18); g.fillCircle(px,py,11);
         g.fillStyle(0xd4c090); g.fillRect(px-5,py-5,10,10);
         g.fillStyle(0xb89a60);
@@ -356,8 +441,9 @@ class WorldScene extends Phaser.Scene {
         const zone = this.add.zone(px,py,24,24).setInteractive({useHandCursor:true}).setDepth(55);
         zone.on('pointerover',()=>{hover.clear();hover.fillStyle(0xffffff,0.14);hover.fillCircle(px,py,13);});
         zone.on('pointerout', ()=>hover.clear());
-        zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterTown(t);});
+        zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterSettlement(t);});
       } else {
+        // City — large walled keep with 5 merlons and double glow
         g.fillStyle(fc,0.08); g.fillCircle(px,py,20);
         g.fillStyle(fc,0.22); g.fillCircle(px,py,14);
         g.fillStyle(0xe8d898); g.fillRect(px-7,py-6,14,13);
@@ -372,7 +458,7 @@ class WorldScene extends Phaser.Scene {
         const zone = this.add.zone(px,py,36,36).setInteractive({useHandCursor:true}).setDepth(55);
         zone.on('pointerover',()=>{hover.clear();hover.fillStyle(0xffffff,0.12);hover.fillCircle(px,py,18);});
         zone.on('pointerout', ()=>hover.clear());
-        zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterTown(t);});
+        zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterSettlement(t);});
       }
     });
   }
@@ -457,10 +543,8 @@ class WorldScene extends Phaser.Scene {
       this.hideNpcTooltip();
       if (!npc.alive || this.activePanel) return;
       if (npc.type === 'villager') return;
-      if (!this.isHostile(npc)) {
-        this.paused = true;
-        this.showEncounterPanel(npc);
-      }
+      this.paused = true;
+      this.showEncounterPanel(npc);
     });
     npc.hoverZone = zone;
   }
@@ -555,27 +639,215 @@ class WorldScene extends Phaser.Scene {
     }}
   }
 
+  // ---- Cargo helpers ----
+  _villagerLoadCargo(village) {
+    if (!village.production || !village.production.length) return {};
+    const good = village.production[0];
+    const amt  = Math.min(village.goods[good]||0, randInt(3,8));
+    return amt > 0 ? { [good]: amt } : {};
+  }
+
+  _caravanLoadCargo(town) {
+    // Pick the good with highest stock to export
+    const good = GOODS.reduce((best, g) =>
+      (town.goods[g]||0) > (town.goods[best]||0) ? g : best, GOODS[0]);
+    const amt = Math.min(town.goods[good]||0, randInt(8,20));
+    if (amt <= 0) return {};
+    town.goods[good] = Math.max(0, town.goods[good] - amt);
+    return { [good]: amt };
+  }
+
+  // ---- NPC target selection ----
   npcPickTarget(npc) {
-    if (npc.type==='bandit') {
+    if (npc.type === 'bandit') {
       const myPow = calcPower(npc);
-      if (calcPower(player)<myPow*0.7 && dist(npc,this.playerPos)<300)
+      // Hunt player if weak enough
+      if (calcPower(player) < myPow*0.7 && dist(npc, this.playerPos) < 300)
         return { x:Math.floor(this.playerPos.x/TILE), y:Math.floor(this.playerPos.y/TILE) };
+      // Hunt nearest weak caravan or villager
       let weak=null, wd=Infinity;
       this.npcs.forEach(o => {
-        if (!o.alive||o===npc||o.faction===npc.faction) return;
-        if (o.type==='caravan' && calcPower(o)<myPow) { const d2=dist(npc,o); if(d2<wd){wd=d2;weak=o;} }
+        if (!o.alive || o===npc) return;
+        if ((o.type==='caravan'||o.type==='villager') && calcPower(o)<myPow) {
+          const d2=dist(npc,o); if(d2<wd){wd=d2;weak=o;}
+        }
       });
-      if (weak && wd<400) return { x:Math.floor(weak.x/TILE), y:Math.floor(weak.y/TILE) };
+      if (weak && wd<500) return { x:Math.floor(weak.x/TILE), y:Math.floor(weak.y/TILE) };
       let gx,gy;
       do { gx=randInt(10,GRID_W-10); gy=randInt(10,GRID_H-10); } while(this.costGrid[gy*GRID_W+gx]>=999);
       return {x:gx,y:gy};
     }
-    if (npc.type==='caravan' || npc.type==='villager') {
+
+    if (npc.type === 'villager') {
+      // Oscillate: home ↔ boundTown
+      const dest = npc.delivering ? npc.destTown : npc.homeTown;
+      if (dest) return { x:dest.x, y:dest.y };
       const t=randPick(this.towns); return {x:t.x,y:t.y};
     }
+
+    if (npc.type === 'caravan') {
+      const dest = npc.destTown || randPick(this.towns);
+      return { x:dest.x, y:dest.y };
+    }
+
+    // Lord — state-driven
+    if (npc.type === 'lord') {
+      if (npc.lordState === 'recruit') {
+        const ft = this.towns.filter(t => t.faction===npc.faction && t.tier>=1);
+        const t  = ft.length ? ft.reduce((b,c) =>
+          Math.hypot(c.x-npc.x/TILE,c.y-npc.y/TILE) < Math.hypot(b.x-npc.x/TILE,b.y-npc.y/TILE) ? c : b)
+          : (npc.homeTown || randPick(this.towns));
+        return { x:t.x, y:t.y };
+      }
+      if (npc.lordState === 'defend' && npc.lordTarget) {
+        const tgt = npc.lordTarget;
+        return { x:Math.floor((tgt.x||tgt.x*TILE+TILE/2)/TILE), y:Math.floor((tgt.y||tgt.y*TILE+TILE/2)/TILE) };
+      }
+      if (npc.lordState === 'attack') {
+        // Move toward nearest enemy town or lord
+        let best=null, bd=Infinity;
+        this.towns.forEach(t => {
+          if (factionsAtWar(npc.faction, t.faction)) {
+            const d=Math.hypot(t.x-npc.x/TILE,t.y-npc.y/TILE);
+            if(d<bd){bd=d;best={x:t.x,y:t.y};}
+          }
+        });
+        if (best) return best;
+      }
+      // Patrol: wander near home faction territory
+      const ft = this.towns.filter(t => t.faction===npc.faction);
+      const t  = randPick(ft.length ? ft : this.towns);
+      return { x:clamp(t.x+randInt(-5,5),0,GRID_W-1), y:clamp(t.y+randInt(-5,5),0,GRID_H-1) };
+    }
+
     const ft = this.towns.filter(t => t.faction===npc.faction);
     const t  = randPick(ft.length ? ft : this.towns);
     return { x:clamp(t.x+randInt(-3,3),0,GRID_W-1), y:clamp(t.y+randInt(-3,3),0,GRID_H-1) };
+  }
+
+  // ---- NPC arrival effects ----
+  npcOnArrival(npc) {
+    if (npc.type === 'villager') {
+      if (npc.delivering && npc.destTown) {
+        // Deliver cargo to bound town
+        const town = npc.destTown;
+        let delivered = '';
+        Object.entries(npc.cargo||{}).forEach(([good, amt]) => {
+          if (amt > 0) {
+            town.goods[good] = (town.goods[good]||0) + amt;
+            delivered += `${amt} ${good} `;
+          }
+        });
+        // Boost recruit pool slightly
+        town.recruitPool = Math.min(20, town.recruitPool + 1);
+        town.prosperity  = Math.min(100, town.prosperity + 1);
+        npc.cargo        = {};
+        npc.delivering   = false;
+        if (delivered) this._worldLog(`Villagers from ${npc.homeTown.name} delivered ${delivered.trim()} to ${town.name}.`);
+      } else {
+        // Arrived back home — reload cargo
+        npc.cargo      = this._villagerLoadCargo(npc.homeTown);
+        npc.delivering = true;
+      }
+      return;
+    }
+
+    if (npc.type === 'caravan') {
+      const dest = npc.destTown;
+      if (!dest) return;
+      // Sell cargo at destination
+      let soldLog = '';
+      Object.entries(npc.cargo||{}).forEach(([good, amt]) => {
+        if (amt > 0) {
+          dest.goods[good] = (dest.goods[good]||0) + amt;
+          dest.prosperity  = Math.min(100, dest.prosperity + 1);
+          soldLog += `${amt} ${good} `;
+        }
+      });
+      if (soldLog) this._worldLog(`Caravan arrived at ${dest.name} with ${soldLog.trim()}.`);
+      // Pick new destination, reload from current town
+      const prev = dest;
+      const candidates = this.towns.filter(t => t !== prev && t.type === 'town');
+      npc.homeTown = prev;
+      npc.destTown = candidates.length ? randPick(candidates) : randPick(this.towns.filter(t=>t.type==='town'));
+      npc.cargo    = this._caravanLoadCargo(prev);
+      return;
+    }
+
+    if (npc.type === 'lord' && npc.lordState === 'recruit') {
+      const total = npc.troops.reduce((s,t)=>s+t.count,0);
+      if (total < 30) {
+        const town = this.towns.filter(t=>t.faction===npc.faction && t.recruitPool>0)
+          .sort((a,b)=>Math.hypot(a.x-npc.x/TILE,a.y-npc.y/TILE)-Math.hypot(b.x-npc.x/TILE,b.y-npc.y/TILE))[0];
+        if (town && town.recruitPool >= 3) {
+          const recruited = Math.min(town.recruitPool, randInt(3,8));
+          town.recruitPool -= recruited;
+          const m = npc.troops.find(t=>t.id===1);
+          if (m) m.count += recruited; else npc.troops.push({id:1, count:recruited});
+          this._worldLog(`${npc.name} recruited ${recruited} from ${town.name}.`);
+          npc.lordState = 'patrol';
+        }
+      }
+    }
+  }
+
+  // ---- Lord daily AI decision ----
+  lordDecideState(lord) {
+    const total = lord.troops.reduce((s,t)=>s+t.count,0);
+    // Weak → go recruit
+    if (total < 15) { lord.lordState='recruit'; lord.lordTarget=null; return; }
+
+    // Check if any bandit or enemy lord is threatening a friendly settlement
+    let threat=null, threatDist=Infinity;
+    this.npcs.forEach(o => {
+      if (!o.alive || o===lord) return;
+      if (!factionsAtWar(lord.faction, o.faction)) return;
+      this.towns.forEach(t => {
+        if (t.faction !== lord.faction) return;
+        const d = dist(o, {x:t.x*TILE,y:t.y*TILE});
+        if (d < 180 && d < threatDist) { threatDist=d; threat=o; }
+      });
+    });
+    if (threat) {
+      lord.lordState  = 'defend';
+      lord.lordTarget = threat;
+      return;
+    }
+
+    // At war → sometimes attack
+    const atWarWith = Object.keys(FACTION_RELATIONS[lord.faction]||{})
+      .filter(f => factionsAtWar(lord.faction, f));
+    if (atWarWith.length && Math.random() < 0.25) {
+      lord.lordState  = 'attack';
+      lord.lordTarget = null;
+      return;
+    }
+
+    // Default: patrol
+    lord.lordState  = 'patrol';
+    lord.lordTarget = null;
+  }
+
+  // ---- Safety decay from nearby threats ----
+  _updateSettlementSafety() {
+    // Reset toward 100
+    this.towns.forEach(t => { t.safety = Math.min(100, t.safety + 2); });
+    // Decay near hostile NPCs
+    this.npcs.forEach(o => {
+      if (!o.alive) return;
+      this.towns.forEach(t => {
+        if (!factionsAtWar(o.faction, t.faction)) return;
+        const d = dist(o, {x:t.x*TILE, y:t.y*TILE});
+        if (d < 200) t.safety = Math.max(0, t.safety - 3);
+      });
+    });
+  }
+
+  // ---- World event log (not player-facing notification) ----
+  _worldLog(msg) {
+    if (!this._logHistory) this._logHistory = [];
+    this._logHistory.push(msg);
+    if (this._logHistory.length > 8) this._logHistory.shift();
   }
 
   npcRepath(npc) {
@@ -752,6 +1024,13 @@ class WorldScene extends Phaser.Scene {
       );
     }
 
+    // Stay mode — advance time while resting inside a settlement (panel active, world paused)
+    if (this.stayMode) {
+      const stayDt = (delta/1000) * this.gameSpeed;
+      this.dayTimer += stayDt;
+      if (this.dayTimer >= 6) { this.dayTimer=0; this.day++; this.dailyTick(); }
+    }
+
     if (this.activePanel || this.paused) return;
 
     const dt = (delta/1000) * this.gameSpeed;
@@ -788,7 +1067,11 @@ class WorldScene extends Phaser.Scene {
         return;
       }
       npc.retargetTimer-=dt;
-      if (npc.retargetTimer<=0 || npc.path.length===0 || npc.pathIdx>=npc.path.length) this.npcRepath(npc);
+      const pathDone = npc.path.length>0 && npc.pathIdx>=npc.path.length;
+      if (npc.retargetTimer<=0 || npc.path.length===0 || pathDone) {
+        if (pathDone) this.npcOnArrival(npc);
+        this.npcRepath(npc);
+      }
       if (npc.path.length>0 && npc.pathIdx<npc.path.length) {
         const t=npc.path[npc.pathIdx];
         const tx=t.x*TILE+TILE/2, ty=t.y*TILE+TILE/2;
@@ -807,15 +1090,18 @@ class WorldScene extends Phaser.Scene {
 
       // Tick encounter cooldown
       if (npc._encounterCooldown && npc._encounterCooldown > 0) npc._encounterCooldown -= dt;
-      if (dist(npc,this.playerPos)<12) this.handleEncounter(npc);
+      if (!this.playerInside && dist(npc,this.playerPos)<12) this.handleEncounter(npc);
     });
 
-    // NPC vs NPC
+    // NPC vs NPC — use faction war/peace relations
     for (let i=0; i<this.npcs.length; i++) { for (let j=i+1; j<this.npcs.length; j++) {
       const a=this.npcs[i], b=this.npcs[j];
-      if (!a.alive||!b.alive||a.faction===b.faction) continue;
+      if (!a.alive||!b.alive) continue;
+      if (!factionsAtWar(a.faction, b.faction)) continue;
       if (a.type==='caravan'&&b.type==='caravan') continue;
-      if (a.type==='villager'||b.type==='villager') continue;  // villagers don't fight
+      // Villagers can be raided by bandits; otherwise villagers don't fight
+      if (a.type==='villager' && b.type!=='bandit') continue;
+      if (b.type==='villager' && a.type!=='bandit') continue;
       if (dist(a,b)<12) this.npcBattle(a,b);
     }}
 
@@ -823,11 +1109,12 @@ class WorldScene extends Phaser.Scene {
   }
 
   isHostile(npc) {
-    return npc.faction === 'Bandit' || npc.type === 'bandit';
+    return factionsAtWar(player.faction || 'Varric League', npc.faction);
   }
 
   handleEncounter(npc) {
     if (this.activePanel) return;
+    if (this.playerInside) return;
     // Villagers: always silent, no interaction
     if (npc.type === 'villager') return;
     // Friendly/neutral: NEVER force a panel — player must click the sprite
@@ -980,6 +1267,12 @@ class WorldScene extends Phaser.Scene {
       player.gold   += r.loot;
       player.xp     += r.dLoss * 2;
       player.renown += Math.max(1, Math.round(r.dLoss/2));
+      // Grant XP to surviving troops (they fought)
+      player.troops.forEach(t => {
+        if (TROOP_UPGRADES[t.id]) {
+          player.troopXP[t.id] = (player.troopXP[t.id]||0) + Math.max(1, Math.round(r.dLoss/Math.max(1,t.count)));
+        }
+      });
       npc.alive       = false;
       npc.respawnTimer= 25;
       this.drawNPC(npc);
@@ -1125,24 +1418,71 @@ class WorldScene extends Phaser.Scene {
     const aC={troops:a.troops.map(t=>({...t}))}; const bC={troops:b.troops.map(t=>({...t}))};
     const r=autoResolve(aC,bC); if(!r) return;
     a.troops=aC.troops; b.troops=bC.troops;
-    if  (r.win  && b.troops.reduce((s,t)=>s+t.count,0)<=0) { b.alive=false; b.respawnTimer=30; this.drawNPC(b); }
-    if (!r.win  && a.troops.reduce((s,t)=>s+t.count,0)<=0) { a.alive=false; a.respawnTimer=30; this.drawNPC(a); }
+    const bDead = b.troops.reduce((s,t)=>s+t.count,0)<=0;
+    const aDead = a.troops.reduce((s,t)=>s+t.count,0)<=0;
+    if (r.win && bDead) {
+      // If bandit won, loot cargo from caravan/villager
+      if (a.type==='bandit' && b.cargo) {
+        const loot = Object.entries(b.cargo).map(([g,n])=>`${n} ${g}`).join(', ');
+        if (loot) this._worldLog(`Bandits raided ${b.name||'a party'} — looted ${loot}.`);
+        b.cargo = {};
+      }
+      b.alive=false; b.respawnTimer=randInt(20,35); this.drawNPC(b);
+    }
+    if (!r.win && aDead) {
+      // If caravan/villager won (rare), bandits retreat
+      if (b.type==='bandit' && a.cargo) {
+        const loot = Object.entries(a.cargo).map(([g,n])=>`${n} ${g}`).join(', ');
+        if (loot) this._worldLog(`Bandits raided ${a.name||'a party'} — looted ${loot}.`);
+        a.cargo = {};
+      }
+      a.alive=false; a.respawnTimer=randInt(20,35); this.drawNPC(a);
+    }
   }
 
   respawnNPC(npc) {
-    let gx,gy;
-    do { gx=randInt(10,GRID_W-10); gy=randInt(10,GRID_H-10); } while(this.costGrid[gy*GRID_W+gx]>=999);
-    npc.x=gx*TILE+TILE/2; npc.y=gy*TILE+TILE/2; npc.alive=true; npc.path=[]; npc.pathIdx=0;
+    npc.alive=true; npc.path=[]; npc.pathIdx=0; npc.retargetTimer=0;
     switch (npc.type) {
-      case 'bandit':   npc.troops = banditTroops();   break;
-      case 'lord':     npc.troops = npc.lordDef ? npc.lordDef.troops.map(t=>({...t})) : lordTroops(); break;
-      case 'villager': npc.troops = villagerTroops();  break;
-      default:         npc.troops = caravanTroops();   break;
+      case 'bandit': {
+        let gx,gy;
+        do { gx=randInt(10,GRID_W-10); gy=randInt(10,GRID_H-10); } while(this.costGrid[gy*GRID_W+gx]>=999);
+        npc.x=gx*TILE+TILE/2; npc.y=gy*TILE+TILE/2;
+        npc.troops = banditTroops();
+        break;
+      }
+      case 'lord': {
+        // Respawn at home town
+        const ht = npc.homeTown || randPick(this.towns.filter(t=>t.faction===npc.faction)||this.towns);
+        npc.x=ht.x*TILE+TILE/2; npc.y=ht.y*TILE+TILE/2;
+        npc.troops = npc.lordDef ? npc.lordDef.troops.map(t=>({...t})) : lordTroops();
+        npc.lordState='patrol'; npc.lordTarget=null;
+        break;
+      }
+      case 'villager': {
+        // Respawn at home village
+        const hv = npc.homeTown;
+        if (hv) { npc.x=hv.x*TILE+TILE/2; npc.y=hv.y*TILE+TILE/2; }
+        npc.troops     = villagerTroops();
+        npc.delivering = true;
+        npc.cargo      = hv ? this._villagerLoadCargo(hv) : {};
+        break;
+      }
+      default: {
+        // Caravan — respawn at home town
+        const townList = this.towns.filter(t=>t.type==='town');
+        const ct = npc.homeTown || randPick(townList.length ? townList : this.towns);
+        npc.x=ct.x*TILE+TILE/2; npc.y=ct.y*TILE+TILE/2;
+        npc.troops   = caravanTroops();
+        npc.destTown = randPick(townList.filter(t=>t!==ct).length ? townList.filter(t=>t!==ct) : townList);
+        npc.cargo    = this._caravanLoadCargo(ct);
+        break;
+      }
     }
     this.drawNPC(npc);
   }
 
   dailyTick() {
+    // Player wages
     let wages=0;
     player.troops.forEach(t => {
       const def = TROOP_BY_ID[t.id];
@@ -1155,7 +1495,28 @@ class WorldScene extends Phaser.Scene {
       player.gold = 0;
       this.battleLog = `Day ${this.day}: Can't pay wages! Desertions.`; this.logTimer=0;
     }
-    this.towns.forEach(t => { t.recruitPool = Math.min(15, t.recruitPool+randInt(0,2)); });
+
+    // Settlement recruit pool growth (proportional to prosperity)
+    this.towns.forEach(t => {
+      const growth = t.tier===0 ? randInt(0,1) : randInt(0,2);
+      t.recruitPool = Math.min(20, t.recruitPool + growth);
+    });
+
+    // Village production — add goods to village stock each day
+    this.towns.filter(t => t.type==='village').forEach(v => {
+      (v.production||[]).forEach(good => {
+        const rate = Math.max(1, Math.round((v.prosperity||50)/30));
+        v.goods[good] = Math.min(60, (v.goods[good]||0) + randInt(1, rate));
+      });
+    });
+
+    // Lord AI daily decisions
+    this.npcs.filter(n => n.alive && n.type==='lord').forEach(lord => {
+      this.lordDecideState(lord);
+    });
+
+    // Settlement safety update
+    this._updateSettlementSafety();
   }
 
   checkLevelUp() {
@@ -1168,7 +1529,14 @@ class WorldScene extends Phaser.Scene {
   }
 
   // ---- Panels ----
-  closePanel() { if (this.activePanel) { this.activePanel.forEach(o=>o.destroy()); this.activePanel=null; } }
+  closePanel() {
+    if (this.activePanel) { this.activePanel.forEach(o=>o.destroy()); this.activePanel=null; }
+    // If player is inside a settlement, reopen the menu (ESC closes sub-panels, not the settlement itself)
+    if (this.playerInside && this.playerInsideSett && !this.stayMode) {
+      // Use a short delay so current destroy cycle completes before rebuilding
+      this.time.delayedCall(10, ()=>this.showSettlementMenu(this.playerInsideSett));
+    }
+  }
 
   panelBg(w,h) {
     const cam=this.cameras.main; const cx=cam.width/2, cy=cam.height/2; const objs=[];
@@ -1182,54 +1550,198 @@ class WorldScene extends Phaser.Scene {
     return {objs, cx, cy, w, h};
   }
 
-  enterTown(town) {
+  enterSettlement(sett) {
     if (this.activePanel) return;
-    const pd = dist(this.playerPos, {x:town.x*TILE+TILE/2, y:town.y*TILE+TILE/2});
+    const pd = dist(this.playerPos, {x:sett.x*TILE+TILE/2, y:sett.y*TILE+TILE/2});
     if (pd > 60) { this.showNotification('Too far! Move closer.'); return; }
-    this.showTownPanel(town);
+    this.playerInside     = true;
+    this.playerInsideSett = sett;
+    this.playerPath       = [];
+    this.pathGfx.clear();
+    this.showSettlementMenu(sett);
   }
 
-  showTownPanel(town) {
-    const pw=420, ph=320;
+  showSettlementMenu(sett) {
+    this.closePanel();
+    const pw=440, ph=320;
     const {objs,cx,cy} = this.panelBg(pw,ph);
     const d = this.add.container(0,0).setScrollFactor(0).setDepth(301);
-    const tl = cx-pw/2+20, tr = cy-ph/2;
-    d.add(this.add.text(tl,tr+12,`${town.name} [${town.faction}]`,{fontSize:THEME.font.lg,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}));
-    d.add(this.add.text(tl,tr+38,`${['Village','Town','City'][town.tier||0]}  ·  Recruits available: ${town.recruitPool}`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
-    let gy2=tr+65;
+    const tl=cx-pw/2+24, top=cy-ph/2;
 
-    // Trade
-    d.add(this.add.text(tl,gy2,'— Trade —',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy2+=20;
-    GOODS.forEach(good => {
-      const stock=town.goods[good]; const price=Math.round(10+50/Math.max(1,stock));
-      d.add(this.add.text(tl,gy2,`${good}: stock ${stock}  buy ${price}g`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
-      const btn = createStyledButton(this, tl+220, gy2, 'Buy 1', ()=>{
-        if (player.gold<price) { this.showNotification('Not enough gold!'); return; }
-        player.gold-=price; player.inventory[good]=(player.inventory[good]||0)+1;
-        town.goods[good]=Math.max(0,town.goods[good]-1);
-        this.showNotification(`Bought ${good} for ${price}g`);
-      }, {depth:302,padX:6,padY:2});
-      d.add(btn); gy2+=20;
-    });
+    // Faction banner strip
+    const fc = THEME.faction[sett.faction] || 0x888888;
+    const banner = this.add.graphics().setScrollFactor(0).setDepth(301);
+    banner.fillStyle(fc, 0.18); banner.fillRect(cx-pw/2+2, top+2, pw-4, 48);
+    objs.push(banner);
 
-    // Recruit — towns/villages only provide Villagers
-    gy2+=8;
-    d.add(this.add.text(tl,gy2,'— Recruit —',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy2+=18;
-    d.add(this.add.text(tl,gy2,'Towns recruit Villagers only. Train them in the field.',{fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy2+=16;
+    // Title
+    const typeLabel = sett.type==='castle' ? 'Castle' : sett.tier===2 ? 'City' : 'Town';
+    d.add(this.add.text(tl, top+10, sett.name, {fontSize:THEME.font.lg,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}));
+    d.add(this.add.text(tl, top+32, `${typeLabel}  ·  ${sett.faction}`, {fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}));
 
-    const villagerDef = TROOP_BY_ID[0];
-    const btn = createStyledButton(this, tl, gy2, `Recruit Villager  (${villagerDef.cost}g)`, ()=>{
-      if (town.recruitPool<=0) { this.showNotification('No recruits available!'); return; }
-      if (player.gold<villagerDef.cost) { this.showNotification('Not enough gold!'); return; }
-      player.gold -= villagerDef.cost; town.recruitPool--;
-      const existing = player.troops.find(t=>t.id===0);
-      if (existing) existing.count++; else player.troops.push({id:0,count:1});
-      this.showNotification(`Recruited a Villager`);
-    }, {depth:302,padX:8,padY:4});
-    d.add(btn);
+    // Stats row
+    let sy = top+60;
+    d.add(this.add.text(tl, sy, `Prosperity: ${sett.prosperity}   Safety: ${Math.round(sett.safety||100)}   Recruit pool: ${sett.recruitPool}`, {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
+    if (sett.type==='village' && sett.boundTown)
+      d.add(this.add.text(tl, sy+18, `Produces: ${(sett.production||[]).join(', ')||'—'}   Supplies: ${sett.boundTown.name}`, {fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}));
+
+    // Action buttons
+    const btnY = top+ph-68, gap=12;
+    let bx=tl;
+    d.add(createStyledButton(this,bx,btnY,'Trade',       ()=>this.showTradePanel(sett),   {depth:302,padX:14,padY:8})); bx+=90+gap;
+    d.add(createStyledButton(this,bx,btnY,'Recruit',     ()=>this.showRecruitPanel(sett), {depth:302,padX:14,padY:8})); bx+=90+gap;
+    d.add(createStyledButton(this,bx,btnY,'Stay',        ()=>this.beginStay(sett),        {depth:302,padX:14,padY:8})); bx+=90+gap;
+    d.add(createStyledButton(this,bx,btnY,'Leave',       ()=>this.leaveSettlement(),      {depth:302,padX:14,padY:8}));
 
     objs.push(d);
     this.activePanel = objs;
+  }
+
+  showTradePanel(sett) {
+    this.closePanel();
+    const pw=460, ph=380;
+    const {objs,cx,cy} = this.panelBg(pw,ph);
+    const d = this.add.container(0,0).setScrollFactor(0).setDepth(301);
+    const tl=cx-pw/2+20, top=cy-ph/2;
+
+    d.add(this.add.text(tl,top+12,`Trade — ${sett.name}`,{fontSize:THEME.font.lg,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}));
+    let gy=top+42;
+
+    GOODS.forEach(good => {
+      const stock=sett.goods[good]||0;
+      const price=Math.round(10+60/Math.max(1,stock));
+      const sellPrice=Math.round(price*0.6);
+      d.add(this.add.text(tl,gy,`${good}: ${stock}  buy ${price}g`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
+      const buyBtn = createStyledButton(this,tl+200,gy,'Buy 1',()=>{
+        if(player.gold<price){this.showNotification('Not enough gold!');return;}
+        player.gold-=price; player.inventory[good]=(player.inventory[good]||0)+1;
+        sett.goods[good]=Math.max(0,(sett.goods[good]||0)-1);
+        this.showNotification(`Bought ${good} for ${price}g`);
+        this.showTradePanel(sett);
+      },{depth:302,padX:6,padY:2});
+      d.add(buyBtn);
+      if((player.inventory[good]||0)>0){
+        const sellBtn=createStyledButton(this,tl+270,gy,`Sell (${sellPrice}g)`,()=>{
+          player.inventory[good]--; player.gold+=sellPrice;
+          sett.goods[good]=(sett.goods[good]||0)+1;
+          sett.prosperity=Math.min(100,(sett.prosperity||0)+1);
+          this.showNotification(`Sold ${good} for ${sellPrice}g`);
+          this.showTradePanel(sett);
+        },{depth:302,padX:6,padY:2});
+        d.add(sellBtn);
+      }
+      gy+=22;
+    });
+
+    // Back button
+    d.add(createStyledButton(this,cx,top+ph-44,'← Back',()=>this.showSettlementMenu(sett),{depth:302,padX:16,padY:8}));
+    objs.push(d);
+    this.activePanel = objs;
+  }
+
+  showRecruitPanel(sett) {
+    this.closePanel();
+    const pw=460, ph=380;
+    const {objs,cx,cy} = this.panelBg(pw,ph);
+    const d = this.add.container(0,0).setScrollFactor(0).setDepth(301);
+    const tl=cx-pw/2+20, top=cy-ph/2;
+
+    d.add(this.add.text(tl,top+12,`Recruit — ${sett.name}`,{fontSize:THEME.font.lg,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}));
+    d.add(this.add.text(tl,top+34,`Pool: ${sett.recruitPool}   Faction: ${sett.faction}`,{fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}));
+    let gy=top+62;
+
+    // Recruit villager
+    const vDef=TROOP_BY_ID[0];
+    d.add(createStyledButton(this,tl,gy,`Recruit Villager  (${vDef.cost}g)`,()=>{
+      if(sett.recruitPool<=0){this.showNotification('No recruits available!');return;}
+      if(player.gold<vDef.cost){this.showNotification('Not enough gold!');return;}
+      player.gold-=vDef.cost; sett.recruitPool--;
+      const ex=player.troops.find(t=>t.id===0);
+      if(ex) ex.count++; else player.troops.push({id:0,count:1});
+      this.showNotification('Recruited a Villager');
+      this.showRecruitPanel(sett);
+    },{depth:302,padX:8,padY:4}));
+    gy+=32;
+
+    // Troop upgrades
+    const upgradeable=player.troops.filter(t=>TROOP_UPGRADES[t.id]);
+    if(upgradeable.length){
+      d.add(this.add.text(tl,gy,'— Upgrade Troops —',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted})); gy+=18;
+      upgradeable.forEach(t=>{
+        const upg=TROOP_UPGRADES[t.id], def=TROOP_BY_ID[t.id], next=TROOP_BY_ID[upg.to];
+        const xp=player.troopXP[t.id]||0, ready=xp>=upg.xp;
+        d.add(this.add.text(tl,gy,`${def.name} ×${t.count}  →  ${next.name}   XP:${xp}/${upg.xp}   Cost:${upg.cost}g`,
+          {fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:ready?THEME.text.green:THEME.text.muted}));
+        if(ready){
+          const fromId=t.id;
+          d.add(createStyledButton(this,tl+310,gy,'Upgrade',()=>{
+            if(player.gold<upg.cost){this.showNotification('Not enough gold!');return;}
+            player.gold-=upg.cost; player.troopXP[fromId]=0;
+            const ex=player.troops.find(s=>s.id===upg.to&&s!==t);
+            if(ex){ex.count+=t.count;player.troops=player.troops.filter(s=>s!==t);}
+            else  {t.id=upg.to;}
+            this.showNotification(`Upgraded to ${next.name}!`);
+            this.showRecruitPanel(sett);
+          },{depth:302,padX:6,padY:2}));
+        }
+        gy+=18;
+      });
+    }
+
+    d.add(createStyledButton(this,cx,top+ph-44,'← Back',()=>this.showSettlementMenu(sett),{depth:302,padX:16,padY:8}));
+    objs.push(d);
+    this.activePanel = objs;
+  }
+
+  beginStay(sett) {
+    this.closePanel();
+    this.stayMode = true;
+    const pw=320, ph=160;
+    const {objs,cx,cy} = this.panelBg(pw,ph);
+    const d = this.add.container(0,0).setScrollFactor(0).setDepth(301);
+    const top=cy-ph/2;
+    d.add(this.add.text(cx,top+20,`Resting at ${sett.name}`,{fontSize:THEME.font.md,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}).setOrigin(0.5,0));
+    d.add(this.add.text(cx,top+46,'Time passes safely...',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted}).setOrigin(0.5,0));
+    d.add(createStyledButton(this,cx,top+90,'Stop Waiting',()=>this.endStay(sett),{depth:302,padX:16,padY:8}));
+    objs.push(d);
+    this.activePanel = objs;
+  }
+
+  endStay(sett) {
+    this.stayMode = false;
+    this.closePanel();
+    this.showSettlementMenu(sett);
+  }
+
+  leaveSettlement() {
+    const sett = this.playerInsideSett;
+    this.playerInside     = false;
+    this.playerInsideSett = null;
+    this.stayMode         = false;
+    this.closePanel();
+    if (sett) {
+      const ep = this._findExitPoint(sett);
+      this.playerPos.x = ep.x*TILE+TILE/2;
+      this.playerPos.y = ep.y*TILE+TILE/2;
+      this.drawPlayer();
+      this.camTarget.x = this.playerPos.x;
+      this.camTarget.y = this.playerPos.y;
+    }
+    this.paused = false;
+  }
+
+  _findExitPoint(sett) {
+    // Search outward from settlement for the nearest passable tile
+    for (let r=2; r<=8; r++) {
+      for (let dy=-r; dy<=r; dy++) {
+        for (let dx=-r; dx<=r; dx++) {
+          if (Math.abs(dx)!==r && Math.abs(dy)!==r) continue; // ring edge only
+          const nx=clamp(sett.x+dx,0,GRID_W-1), ny=clamp(sett.y+dy,0,GRID_H-1);
+          if (this.costGrid[ny*GRID_W+nx] < 999) return {x:nx,y:ny};
+        }
+      }
+    }
+    return {x:sett.x,y:sett.y};
   }
 
   showPartyPanel() {

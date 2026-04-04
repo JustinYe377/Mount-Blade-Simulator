@@ -26,10 +26,13 @@ const TERRAIN_BY_ID = Object.values(TERRAIN);
 
 // --- Faction colours (hex numbers for Phaser graphics) ---
 const FACTION_COLORS = {
-  Kingdom: 0x4488ff,
-  Empire:  0xee4444,
-  Rebels:  0x44cc44,
-  Bandit:  0x998844,
+  'Varric League':    0x4488ff,   // blue
+  'Arden Clans':      0x44cc44,   // green
+  'Skeldir Holds':    0x88ccff,   // ice blue
+  'Auric Empire':     0xcc3333,   // imperial red
+  'Qaratai Khanate':  0xddaa22,   // steppe gold
+  'Zahir Sultanate':  0xcc7722,   // desert amber
+  'Bandit':           0x998844,   // dirty gold
 };
 
 // --- Troop definitions ---
@@ -116,4 +119,32 @@ const THEME = {
   spacing: {
     pad: 8,
   },
+};
+
+// --- Faction relations ---
+// 'war' → parties can fight; 'peace' → they do not engage each other
+const FACTION_RELATIONS = {
+  'Varric League':   { 'Varric League':'peace', 'Arden Clans':'war',   'Skeldir Holds':'peace', 'Auric Empire':'war',   'Qaratai Khanate':'peace', 'Zahir Sultanate':'peace', 'Bandit':'war'  },
+  'Arden Clans':     { 'Varric League':'war',   'Arden Clans':'peace', 'Skeldir Holds':'war',   'Auric Empire':'peace', 'Qaratai Khanate':'war',   'Zahir Sultanate':'peace', 'Bandit':'peace'},
+  'Skeldir Holds':   { 'Varric League':'peace', 'Arden Clans':'war',   'Skeldir Holds':'peace', 'Auric Empire':'war',   'Qaratai Khanate':'peace', 'Zahir Sultanate':'peace', 'Bandit':'war'  },
+  'Auric Empire':    { 'Varric League':'war',   'Arden Clans':'peace', 'Skeldir Holds':'war',   'Auric Empire':'peace', 'Qaratai Khanate':'war',   'Zahir Sultanate':'war',   'Bandit':'war'  },
+  'Qaratai Khanate': { 'Varric League':'peace', 'Arden Clans':'war',   'Skeldir Holds':'peace', 'Auric Empire':'war',   'Qaratai Khanate':'peace', 'Zahir Sultanate':'war',   'Bandit':'peace'},
+  'Zahir Sultanate': { 'Varric League':'peace', 'Arden Clans':'peace', 'Skeldir Holds':'peace', 'Auric Empire':'war',   'Qaratai Khanate':'war',   'Zahir Sultanate':'peace', 'Bandit':'war'  },
+  'Bandit':          { 'Varric League':'war',   'Arden Clans':'peace', 'Skeldir Holds':'war',   'Auric Empire':'war',   'Qaratai Khanate':'peace', 'Zahir Sultanate':'war',   'Bandit':'peace'},
+};
+
+function factionsAtWar(f1, f2) {
+  return (FACTION_RELATIONS[f1]?.[f2] ?? 'war') === 'war';
+}
+
+// --- Troop upgrade paths ---
+// Maps source troop id → { to: target id, xp: xp required, cost: gold cost }
+const TROOP_UPGRADES = {
+  0: { to: 1, xp: 10,  cost: 10  },   // Villager      → Militia
+  1: { to: 2, xp: 30,  cost: 30  },   // Militia       → Footman
+  4: { to: 5, xp: 30,  cost: 40  },   // Scout Cavalry → Light Cavalry
+  7: { to: 8, xp: 30,  cost: 30  },   // Archer        → Trained Archer
+  2: { to: 3, xp: 80,  cost: 100 },   // Footman       → Man-at-Arms
+  5: { to: 6, xp: 80,  cost: 110 },   // Light Cavalry → Knight
+  8: { to: 9, xp: 80,  cost: 100 },   // Trained Archer→ Longbowman
 };

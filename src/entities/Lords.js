@@ -1,29 +1,28 @@
 // ============================================================
-// Lords.js — 10 static named Lords with fixed skills & troops
+// Lords.js — 12 named lords distributed across 6 factions
 // All lords have skills: { tactics, leadership, trading, pathfinding }
-// Their troops are deterministic (no randInt) so they stay consistent.
 // ============================================================
 
 const LORD_DEFS = [
-  // ── Kingdom ──────────────────────────────────────────────
+
+  // ── Varric League ────────────────────────────────────────
   {
     id: 'lord_aldric',
     name: 'Aldric the Bold',
-    faction: 'Kingdom',
+    faction: 'Varric League',
     title: 'Marshal of the Northern March',
     skills: { tactics:5, leadership:4, trading:1, pathfinding:2 },
     troops: [
       {id:2,count:18}, // Footman
       {id:3,count:8},  // Man-at-Arms
       {id:5,count:6},  // Light Cavalry
-      {id:6,count:3},  // Knight
       {id:8,count:8},  // Trained Archer
     ],
   },
   {
     id: 'lord_hazel',
     name: 'Lady Hazel',
-    faction: 'Kingdom',
+    faction: 'Varric League',
     title: 'Warden of the Greenwood',
     skills: { tactics:3, leadership:2, trading:3, pathfinding:4 },
     troops: [
@@ -33,25 +32,68 @@ const LORD_DEFS = [
       {id:4,count:4},  // Scout Cavalry
     ],
   },
+
+  // ── Arden Clans ──────────────────────────────────────────
+  {
+    id: 'lord_brann',
+    name: 'Brann Oakshield',
+    faction: 'Arden Clans',
+    title: 'Chieftain of the Deepwood',
+    skills: { tactics:4, leadership:3, trading:1, pathfinding:5 },
+    troops: [
+      {id:1,count:24}, // Militia (large clan warband)
+      {id:2,count:10}, // Footman
+      {id:7,count:16}, // Archer
+      {id:9,count:4},  // Longbowman
+    ],
+  },
+  {
+    id: 'lord_mira',
+    name: 'Mira the Outlaw Queen',
+    faction: 'Arden Clans',
+    title: 'Shadow of Crestfall',
+    skills: { tactics:5, leadership:4, trading:3, pathfinding:5 },
+    troops: [
+      {id:4,count:14}, // Scout Cavalry
+      {id:5,count:8},  // Light Cavalry
+      {id:8,count:10}, // Trained Archer
+      {id:9,count:5},  // Longbowman
+    ],
+  },
+
+  // ── Skeldir Holds ────────────────────────────────────────
   {
     id: 'lord_vorn',
     name: 'Vorn Ironsword',
-    faction: 'Kingdom',
-    title: 'Knight-Commander of Riverholt',
+    faction: 'Skeldir Holds',
+    title: 'Jarl of the Frostpeak',
     skills: { tactics:4, leadership:5, trading:1, pathfinding:2 },
     troops: [
       {id:2,count:20}, // Footman
       {id:3,count:12}, // Man-at-Arms
-      {id:6,count:6},  // Knight
-      {id:5,count:8},  // Light Cavalry
+      {id:6,count:4},  // Knight
+      {id:8,count:8},  // Trained Archer
+    ],
+  },
+  {
+    id: 'lord_sigrid',
+    name: 'Sigrid Frostborn',
+    faction: 'Skeldir Holds',
+    title: 'Shield-Maiden of Varngard',
+    skills: { tactics:3, leadership:3, trading:2, pathfinding:4 },
+    troops: [
+      {id:1,count:18}, // Militia
+      {id:2,count:10}, // Footman
+      {id:3,count:6},  // Man-at-Arms
+      {id:7,count:10}, // Archer
     ],
   },
 
-  // ── Empire ───────────────────────────────────────────────
+  // ── Auric Empire ─────────────────────────────────────────
   {
     id: 'lord_magnus',
     name: 'Magnus Auric',
-    faction: 'Empire',
+    faction: 'Auric Empire',
     title: 'Legate of the Southern Reach',
     skills: { tactics:5, leadership:5, trading:2, pathfinding:2 },
     troops: [
@@ -64,7 +106,7 @@ const LORD_DEFS = [
   {
     id: 'lord_sera',
     name: 'Sera Valdris',
-    faction: 'Empire',
+    faction: 'Auric Empire',
     title: 'Prefect of Dustmere',
     skills: { tactics:2, leadership:3, trading:5, pathfinding:3 },
     troops: [
@@ -74,72 +116,59 @@ const LORD_DEFS = [
       {id:7,count:6},  // Archer
     ],
   },
+
+  // ── Qaratai Khanate ──────────────────────────────────────
   {
-    id: 'lord_crassus',
-    name: 'Crassus the Mercenary',
-    faction: 'Empire',
-    title: 'Captain-General of Frostpeak',
-    skills: { tactics:3, leadership:2, trading:4, pathfinding:1 },
+    id: 'lord_temur',
+    name: 'Temur Khan',
+    faction: 'Qaratai Khanate',
+    title: 'Khan of the Eastern Steppe',
+    skills: { tactics:5, leadership:5, trading:2, pathfinding:4 },
+    troops: [
+      {id:4,count:16}, // Scout Cavalry
+      {id:5,count:12}, // Light Cavalry
+      {id:6,count:6},  // Knight
+      {id:8,count:8},  // Trained Archer
+    ],
+  },
+  {
+    id: 'lord_esen',
+    name: 'Esen Swiftstride',
+    faction: 'Qaratai Khanate',
+    title: 'Noyan of the Windplains',
+    skills: { tactics:3, leadership:3, trading:3, pathfinding:5 },
+    troops: [
+      {id:4,count:20}, // Scout Cavalry
+      {id:5,count:8},  // Light Cavalry
+      {id:7,count:10}, // Archer
+    ],
+  },
+
+  // ── Zahir Sultanate ──────────────────────────────────────
+  {
+    id: 'lord_qahir',
+    name: 'Qahir al-Zand',
+    faction: 'Zahir Sultanate',
+    title: 'Sultan of the Desert Reaches',
+    skills: { tactics:4, leadership:5, trading:4, pathfinding:2 },
     troops: [
       {id:2,count:14}, // Footman
-      {id:3,count:6},  // Man-at-Arms
-      {id:8,count:10}, // Trained Archer
-      {id:4,count:8},  // Scout Cavalry
-    ],
-  },
-
-  // ── Rebels ───────────────────────────────────────────────
-  {
-    id: 'lord_theron',
-    name: 'Theron Ashveil',
-    faction: 'Rebels',
-    title: 'Champion of the Free People',
-    skills: { tactics:4, leadership:3, trading:2, pathfinding:3 },
-    troops: [
-      {id:1,count:22}, // Militia (many recruits)
-      {id:2,count:10}, // Footman
-      {id:7,count:14}, // Archer
-      {id:9,count:4},  // Longbowman
+      {id:3,count:8},  // Man-at-Arms
+      {id:5,count:10}, // Light Cavalry
+      {id:9,count:6},  // Longbowman
     ],
   },
   {
-    id: 'lord_mira',
-    name: 'Mira the Outlaw Queen',
-    faction: 'Rebels',
-    title: 'Shadow of Crestfall',
-    skills: { tactics:5, leadership:4, trading:3, pathfinding:5 },
+    id: 'lord_saffar',
+    name: 'Saffar the Gilded',
+    faction: 'Zahir Sultanate',
+    title: 'Vizier of Qahir',
+    skills: { tactics:2, leadership:3, trading:5, pathfinding:3 },
     troops: [
-      {id:4,count:14}, // Scout Cavalry
-      {id:5,count:8},  // Light Cavalry
-      {id:8,count:10}, // Trained Archer
-      {id:9,count:5},  // Longbowman
-    ],
-  },
-
-  // ── Bandit Lords (named, dangerous) ──────────────────────
-  {
-    id: 'lord_grak',
-    name: 'Grak Bonecrusher',
-    faction: 'Bandit',
-    title: 'King of the Wastes',
-    skills: { tactics:3, leadership:4, trading:1, pathfinding:2 },
-    troops: [
-      {id:1,count:30}, // Militia (bandit horde)
-      {id:2,count:15}, // Footman
-      {id:3,count:6},  // Man-at-Arms
-    ],
-  },
-  {
-    id: 'lord_sable',
-    name: 'Sable the Knife',
-    faction: 'Bandit',
-    title: 'Master of the Dark Road',
-    skills: { tactics:4, leadership:2, trading:3, pathfinding:5 },
-    troops: [
-      {id:1,count:12}, // Militia
-      {id:2,count:8},  // Footman
-      {id:4,count:10}, // Scout Cavalry
-      {id:5,count:4},  // Light Cavalry
+      {id:1,count:18}, // Militia
+      {id:4,count:12}, // Scout Cavalry
+      {id:7,count:12}, // Archer
+      {id:8,count:6},  // Trained Archer
     ],
   },
 ];
