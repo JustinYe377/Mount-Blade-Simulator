@@ -27,8 +27,8 @@ const THEME = {
   },
   hud: {
     fill:      0x0e0c07,
-    fillAlpha: 0.90,
-    height:    46,
+    fillAlpha: 0.92,
+    height:    54,            // increased for readability
   },
   minimap: {
     bg:         0x080706,
@@ -36,6 +36,10 @@ const THEME = {
     frameInner: 0x38301c,
     w: 126,
     h: 96,
+  },
+  log: {
+    w: 370,                   // event log panel width
+    h: 80,                    // event log panel height
   },
   faction: {
     Kingdom: 0x4488ff,
@@ -46,11 +50,11 @@ const THEME = {
   font: {
     ui:  'Georgia, "Times New Roman", serif',
     mono: '"Courier New", Courier, monospace',
-    xs:  '9px',
-    sm:  '11px',
-    md:  '13px',
-    lg:  '16px',
-    xl:  '20px',
+    xs:  '12px',              // was 9px
+    sm:  '13px',              // was 11px
+    md:  '15px',              // was 13px
+    lg:  '17px',              // was 16px
+    xl:  '21px',              // was 20px
   },
   spacing: {
     pad: 16,

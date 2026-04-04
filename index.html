@@ -686,33 +686,112 @@ class WorldScene extends Phaser.Scene {
   // ---- HUD ----
   createHUD(){
     const cam=this.cameras.main;
-    // Parchment-dark HUD bar
-    this.hudBg=this.add.rectangle(cam.width/2,0,cam.width,THEME.hud.height,THEME.hud.fill,THEME.hud.fillAlpha).setOrigin(0.5,0).setScrollFactor(0).setDepth(200);
-    // Bronze bottom border line
-    const hudLine=this.add.graphics().setScrollFactor(0).setDepth(201);
-    hudLine.lineStyle(1,THEME.panel.border,0.75);
-    hudLine.lineBetween(0,THEME.hud.height,cam.width,THEME.hud.height);
+    const w=cam.width, h=cam.height;
+    this._notifications=[];
+    this._logHistory=[];
+    this._lastNotifLog='';
+
+    // Top bar
+    this.hudBg=this.add.rectangle(w/2,0,w,THEME.hud.height,THEME.hud.fill,THEME.hud.fillAlpha).setOrigin(0.5,0).setScrollFactor(0).setDepth(200);
+    this.hudLine=this.add.graphics().setScrollFactor(0).setDepth(201);
+    this.hudLine.lineStyle(1,THEME.panel.border,0.75);
+    this.hudLine.lineBetween(0,THEME.hud.height,w,THEME.hud.height);
 
     this.hudText=this.add.text(10,7,'',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}).setScrollFactor(0).setDepth(201);
-    this.pauseLabel=this.add.text(cam.width/2,5,'⏸  PAUSED  [SPACE]',{fontSize:'12px',fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}).setOrigin(0.5,0).setScrollFactor(0).setDepth(201);
-    this.speedLabel=this.add.text(cam.width/2,22,'Speed: 1x  [1/2/3]',{fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}).setOrigin(0.5,0).setScrollFactor(0).setDepth(201);
+    this.pauseLabel=this.add.text(w/2,5,'⏸  PAUSED  [SPACE]',{fontSize:THEME.font.md,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}).setOrigin(0.5,0).setScrollFactor(0).setDepth(201);
+    this.speedLabel=this.add.text(w/2,26,'Speed: 1x  [1/2/3]',{fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}).setOrigin(0.5,0).setScrollFactor(0).setDepth(201);
 
-    const bx=cam.width-10;
-    createStyledButton(this,bx-116,8,'Party',()=>this.showPartyPanel(),{depth:201,padX:8,padY:3});
-    createStyledButton(this,bx-54,8,'Inventory',()=>this.showInventoryPanel(),{depth:201,padX:8,padY:3});
+    const bx=w-10;
+    this.partyBtn=createStyledButton(this,bx-130,8,'Party',()=>this.showPartyPanel(),{depth:201,padX:8,padY:3});
+    this.invBtn=createStyledButton(this,bx-62,8,'Inventory',()=>this.showInventoryPanel(),{depth:201,padX:8,padY:3});
 
-    this.logText=this.add.text(10,cam.height-58,'',{fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.gold,wordWrap:{width:320},stroke:'#000',strokeThickness:1}).setScrollFactor(0).setDepth(201);
-    this.terrainTip=this.add.text(10,cam.height-14,'',{fontSize:THEME.font.xs,fontFamily:THEME.font.mono,color:THEME.text.muted}).setScrollFactor(0).setDepth(201);
+    // Event log panel (bottom-left)
+    const lw=THEME.log.w, lh=THEME.log.h;
+    this.logPanel=this.add.rectangle(0,h-lh,lw,lh,THEME.panel.fill,0.82).setOrigin(0,0).setScrollFactor(0).setDepth(198);
+    this.logPanelBorder=this.add.graphics().setScrollFactor(0).setDepth(199);
+    this.logPanelBorder.lineStyle(1,THEME.panel.border,0.6);
+    this.logPanelBorder.strokeRect(0,h-lh,lw,lh);
+    this.logText=this.add.text(10,h-lh+8,'',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.gold,wordWrap:{width:lw-20},lineSpacing:4,stroke:'#000',strokeThickness:1}).setScrollFactor(0).setDepth(201);
+    this.terrainTip=this.add.text(10,h-14,'',{fontSize:THEME.font.xs,fontFamily:THEME.font.mono,color:THEME.text.muted}).setScrollFactor(0).setDepth(201);
 
     // Minimap
     const mw=THEME.minimap.w, mh=THEME.minimap.h;
-    const mx=cam.width-mw-THEME.spacing.pad, my=cam.height-mh-THEME.spacing.pad;
-    drawMinimapFrame(this,mx,my,mw,mh);
+    const mx=w-mw-THEME.spacing.pad, my=h-mh-THEME.spacing.pad;
+    this.minimapFrameGfx=drawMinimapFrame(this,mx,my,mw,mh);
     this.minimapTex=this.add.renderTexture(mx,my,mw,mh).setScrollFactor(0).setDepth(200);
-    drawMinimapBorder(this,mx,my,mw,mh);
+    this.minimapBorderGfx=drawMinimapBorder(this,mx,my,mw,mh);
     this.minimapGfx=this.make.graphics({add:false});
     this._mmW=mw;this._mmH=mh;
     this.drawMinimap();
+
+    // Resize handler — reposition all screen-anchored elements
+    this.scale.on('resize',(gameSize)=>this.onResize(gameSize.width,gameSize.height),this);
+  }
+
+  onResize(w,h){
+    // Top bar
+    this.hudBg.setPosition(w/2,0).setSize(w,THEME.hud.height);
+    this.hudLine.clear();
+    this.hudLine.lineStyle(1,THEME.panel.border,0.75);
+    this.hudLine.lineBetween(0,THEME.hud.height,w,THEME.hud.height);
+    this.pauseLabel.setPosition(w/2,5);
+    this.speedLabel.setPosition(w/2,26);
+    const bx=w-10;
+    this.partyBtn.setPosition(bx-130,8);
+    this.invBtn.setPosition(bx-62,8);
+
+    // Log panel
+    const lw=THEME.log.w, lh=THEME.log.h;
+    this.logPanel.setPosition(0,h-lh);
+    this.logPanelBorder.clear();
+    this.logPanelBorder.lineStyle(1,THEME.panel.border,0.6);
+    this.logPanelBorder.strokeRect(0,h-lh,lw,lh);
+    this.logText.setPosition(10,h-lh+8);
+    this.terrainTip.setPosition(10,h-14);
+
+    // Minimap
+    const mw=THEME.minimap.w, mh=THEME.minimap.h;
+    const mx=w-mw-THEME.spacing.pad, my=h-mh-THEME.spacing.pad;
+    this.minimapFrameGfx.clear();
+    this.minimapFrameGfx.fillStyle(0x000000,0.55);
+    this.minimapFrameGfx.fillRect(mx-3,my-3,mw+6,mh+6);
+    this.minimapFrameGfx.fillStyle(THEME.minimap.bg,1.0);
+    this.minimapFrameGfx.fillRect(mx,my,mw,mh);
+    this.minimapTex.setPosition(mx,my);
+    this.minimapBorderGfx.clear();
+    this.minimapBorderGfx.lineStyle(2,THEME.minimap.frame,1.0);
+    this.minimapBorderGfx.strokeRect(mx-1,my-1,mw+2,mh+2);
+    this.minimapBorderGfx.lineStyle(1,THEME.minimap.frameInner,0.85);
+    this.minimapBorderGfx.strokeRect(mx+1,my+1,mw-2,mh-2);
+    this.drawMinimap();
+
+    // Restack notifications
+    this._notifications.forEach((n,i)=>{n.obj.setPosition(w/2,THEME.hud.height+20+i*32);});
+  }
+
+  showNotification(msg){
+    const w=this.cameras.main.width;
+    if(this._notifications.length>=4){const old=this._notifications.shift();old.obj.destroy();}
+    const y=THEME.hud.height+20+this._notifications.length*32;
+    const fillHex='#'+THEME.panel.fill.toString(16).padStart(6,'0');
+    const obj=this.add.text(w/2,y,msg,{
+      fontSize:THEME.font.md,fontFamily:THEME.font.ui,
+      color:THEME.text.gold,backgroundColor:fillHex,
+      padding:{x:14,y:6},stroke:'#000000',strokeThickness:2,
+    }).setOrigin(0.5,0).setScrollFactor(0).setDepth(210).setAlpha(1);
+    this._notifications.push({obj,timer:0,life:4.5});
+  }
+
+  _tickNotifications(dt){
+    if(!this._notifications.length)return;
+    const w=this.cameras.main.width;
+    for(let i=this._notifications.length-1;i>=0;i--){
+      const n=this._notifications[i];
+      n.timer+=dt;
+      if(n.timer>=n.life){n.obj.destroy();this._notifications.splice(i,1);}
+      else if(n.timer>=n.life-1.0){n.obj.setAlpha(Math.max(0,1-(n.timer-(n.life-1.0))));}
+    }
+    this._notifications.forEach((n,i)=>{n.obj.setPosition(w/2,THEME.hud.height+20+i*32);});
   }
 
   drawMinimap(){
@@ -763,7 +842,13 @@ class WorldScene extends Phaser.Scene {
     this.hudText.setText(`Gold: ${player.gold}  ·  Troops: ${tot}  ·  Power: ${calcPower(player)}  ·  Day ${this.day}  ·  Renown: ${player.renown}  ·  Lv ${player.level}`);
     this.pauseLabel.setVisible(this.paused);
     this.speedLabel.setText(`Speed: ${this.gameSpeed}x [1/2/3]`);
-    if(this.battleLog)this.logText.setText(this.battleLog);
+    if(this.battleLog && this.battleLog!==this._lastNotifLog){
+      this._lastNotifLog=this.battleLog;
+      this._logHistory.push(this.battleLog);
+      if(this._logHistory.length>8)this._logHistory.shift();
+      this.showNotification(this.battleLog);
+    }
+    this.logText.setText(this._logHistory.slice(-4).join('\n'));
     const ptr=this.input.activePointer;
     const gx=clamp(Math.floor(ptr.worldX/TILE),0,GRID_W-1);
     const gy=clamp(Math.floor(ptr.worldY/TILE),0,GRID_H-1);
@@ -775,12 +860,13 @@ class WorldScene extends Phaser.Scene {
 
   update(time,delta){
     this.updateHUD();
+    this._tickNotifications(delta/1000);
     if(this.activePanel||this.paused)return;
     const dt=(delta/1000)*this.gameSpeed;
 
     this.dayTimer+=dt;
     if(this.dayTimer>=6){this.dayTimer=0;this.day++;this.dailyTick();}
-    if(this.battleLog){this.logTimer+=dt;if(this.logTimer>8){this.battleLog='';this.logTimer=0;}}
+    if(this.battleLog){this.logTimer+=dt;if(this.logTimer>8){this.battleLog='';this._lastNotifLog='';this.logTimer=0;}}
 
     // Player movement along A* path
     if(this.playerPath.length>0&&this.playerPathIdx<this.playerPath.length){
@@ -888,7 +974,7 @@ class WorldScene extends Phaser.Scene {
 
   checkLevelUp(){
     const need=player.level*50;
-    if(player.xp>=need){player.xp-=need;player.level++;this.showLevelUpPanel();}
+    if(player.xp>=need){player.xp-=need;player.level++;this.showNotification(`Level Up!  Now level ${player.level}`);this.showLevelUpPanel();}
   }
 
   // ---- PANELS ----
