@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Warbands — 2D Mount & Blade</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.60.0/phaser.min.js"></script>
+<script src="src/config.js"></script>
+<script src="src/ui/Panel.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #0a0a0f; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
@@ -235,6 +237,7 @@ class WorldScene extends Phaser.Scene {
 
     // Place towns
     this.towns = this.placeTowns(8);
+    this.renderTerrainOverlays();
     this.drawTowns();
 
     // Pathfinder
@@ -260,8 +263,8 @@ class WorldScene extends Phaser.Scene {
     // Click to move
     this.input.on('pointerdown', (ptr) => {
       if(this.activePanel) return;
-      // Check if clicking on HUD area (top 50px in screen space)
-      if(ptr.y < 50) return;
+      // Check if clicking on HUD area
+      if(ptr.y < THEME.hud.height + 4) return;
       const wx=ptr.worldX, wy=ptr.worldY;
       const gx=clamp(Math.floor(wx/TILE),0,GRID_W-1);
       const gy=clamp(Math.floor(wy/TILE),0,GRID_H-1);
@@ -350,6 +353,64 @@ class WorldScene extends Phaser.Scene {
     rt.draw(g);g.destroy();
   }
 
+  renderTerrainOverlays(){
+    const rt=this.add.renderTexture(0,0,MAP_W,MAP_H).setOrigin(0).setDepth(1);
+    const g=this.make.graphics({add:false});
+
+    // — Coastline shadow: darken land tiles bordering water —
+    for(let y=1;y<GRID_H-1;y++){for(let x=1;x<GRID_W-1;x++){
+      const tid=this.terrainGrid[y*GRID_W+x];
+      if(tid<=TERRAIN.WATER.id) continue;
+      let adj=0;
+      if(this.terrainGrid[y*GRID_W+x-1]<=TERRAIN.WATER.id)adj++;
+      if(this.terrainGrid[y*GRID_W+x+1]<=TERRAIN.WATER.id)adj++;
+      if(this.terrainGrid[(y-1)*GRID_W+x]<=TERRAIN.WATER.id)adj++;
+      if(this.terrainGrid[(y+1)*GRID_W+x]<=TERRAIN.WATER.id)adj++;
+      if(adj>0){g.fillStyle(0x000000,0.22+adj*0.05);g.fillRect(x*TILE,y*TILE,TILE,TILE);}
+    }}
+
+    // — Forest canopy dots (every other forest tile) —
+    for(let y=0;y<GRID_H;y+=2){for(let x=0;x<GRID_W;x+=2){
+      const tid=this.terrainGrid[y*GRID_W+x];
+      if(tid!==TERRAIN.FOREST.id&&tid!==TERRAIN.DENSE_FOREST.id) continue;
+      const alpha=tid===TERRAIN.DENSE_FOREST.id?0.32:0.20;
+      g.fillStyle(0x002200,alpha);
+      const ox=(x*7+y*3)%4, oy=(y*5+x*2)%4;
+      g.fillCircle(x*TILE+ox+2,y*TILE+oy+2,2.2);
+    }}
+
+    // — Mountain ridge highlights (top edge of mountain clusters) —
+    for(let y=1;y<GRID_H;y++){for(let x=0;x<GRID_W;x++){
+      const tid=this.terrainGrid[y*GRID_W+x];
+      if(tid!==TERRAIN.MOUNTAIN.id&&tid!==TERRAIN.SNOW.id) continue;
+      const above=this.terrainGrid[(y-1)*GRID_W+x];
+      if(above!==TERRAIN.MOUNTAIN.id&&above!==TERRAIN.SNOW.id){
+        g.fillStyle(0xffffff,0.14);g.fillRect(x*TILE,y*TILE,TILE,2);
+      }
+    }}
+
+    // — Roads: faint tan lines between each town and its 2 nearest neighbours —
+    const drawn=new Set();
+    this.towns.forEach((a,ai)=>{
+      const sorted=this.towns
+        .map((b,bi)=>({b,bi,d:Math.hypot(b.x-a.x,b.y-a.y)}))
+        .filter(({bi})=>bi!==ai)
+        .sort((p,q)=>p.d-q.d)
+        .slice(0,2);
+      sorted.forEach(({b,bi})=>{
+        const key=Math.min(ai,bi)+','+Math.max(ai,bi);
+        if(drawn.has(key))return;drawn.add(key);
+        g.lineStyle(1.5,0xc8a050,0.32);
+        g.beginPath();
+        g.moveTo(a.x*TILE+TILE/2,a.y*TILE+TILE/2);
+        g.lineTo(b.x*TILE+TILE/2,b.y*TILE+TILE/2);
+        g.strokePath();
+      });
+    });
+
+    rt.draw(g);g.destroy();
+  }
+
   placeTowns(count){
     const names=['Riverholt','Ashford','Thornwall','Dustmere','Frostpeak','Goldmere','Crestfall','Windhaven'];
     const factions=['Kingdom','Kingdom','Kingdom','Empire','Empire','Empire','Rebels','Rebels'];
@@ -368,12 +429,25 @@ class WorldScene extends Phaser.Scene {
   drawTowns(){
     this.towns.forEach(t=>{
       const px=t.x*TILE+TILE/2,py=t.y*TILE+TILE/2;
+      const fc=THEME.faction[t.faction]||0x888888;
+      const hover=this.add.graphics().setDepth(29);
       const g=this.add.graphics().setDepth(30);
-      g.fillStyle(0xddccaa);g.fillRect(px-6,py-6,12,12);
-      g.lineStyle(1,FACTION_COLORS[t.faction]);g.strokeRect(px-6,py-6,12,12);
-      g.fillStyle(0xccbb99);g.fillRect(px-8,py-9,4,4);g.fillRect(px+4,py-9,4,4);
-      this.add.text(px,py+10,t.name,{fontSize:'7px',fontFamily:'monospace',color:'#eee',stroke:'#000',strokeThickness:2}).setOrigin(0.5,0).setDepth(31);
+      // Faction glow ring
+      g.fillStyle(fc,0.18);g.fillCircle(px,py,11);
+      // Castle body
+      g.fillStyle(0xd4c090);g.fillRect(px-5,py-5,10,10);
+      // Battlements (three merlons)
+      g.fillStyle(0xb89a60);
+      g.fillRect(px-5,py-8,3,3);g.fillRect(px-1,py-8,3,3);g.fillRect(px+3,py-8,3,3);
+      // Faction-colored border
+      g.lineStyle(1.5,fc,0.9);g.strokeRect(px-5,py-5,10,10);
+      // Door
+      g.fillStyle(0x1a1208);g.fillRect(px-1,py+1,3,4);
+      // Name label
+      this.add.text(px,py+9,t.name,{fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.gold,stroke:'#000',strokeThickness:2}).setOrigin(0.5,0).setDepth(31);
       const zone=this.add.zone(px,py,24,24).setInteractive({useHandCursor:true}).setDepth(55);
+      zone.on('pointerover',()=>{hover.clear();hover.fillStyle(0xffffff,0.14);hover.fillCircle(px,py,13);});
+      zone.on('pointerout',()=>{hover.clear();});
       zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterTown(t);});
     });
   }
@@ -389,20 +463,36 @@ class WorldScene extends Phaser.Scene {
 
   drawNPC(npc){
     npc.graphics.clear();if(!npc.alive)return;
-    const c=FACTION_COLORS[npc.faction]||0x888888;
-    npc.graphics.fillStyle(c);
-    if(npc.type==='lord'){npc.graphics.fillRect(-5,-5,10,10);npc.graphics.lineStyle(1,0xffffff,0.5);npc.graphics.strokeRect(-5,-5,10,10);}
-    else if(npc.type==='bandit'){npc.graphics.fillCircle(0,0,5);}
-    else{npc.graphics.fillTriangle(0,-5,-4,4,4,4);}
+    const c=THEME.faction[npc.faction]||0x888888;
+    if(npc.type==='lord'){
+      // Gold-bordered square with drop shadow
+      npc.graphics.fillStyle(0x000000,0.4);npc.graphics.fillRect(-4,-4,10,10);
+      npc.graphics.fillStyle(c,0.9);npc.graphics.fillRect(-5,-5,10,10);
+      npc.graphics.lineStyle(1.5,0xffd866,0.85);npc.graphics.strokeRect(-5,-5,10,10);
+    } else if(npc.type==='bandit'){
+      // Dark circle with inner void
+      npc.graphics.fillStyle(0x000000,0.4);npc.graphics.fillCircle(1,1,5);
+      npc.graphics.fillStyle(c,0.85);npc.graphics.fillCircle(0,0,5);
+      npc.graphics.fillStyle(0x000000,0.45);npc.graphics.fillCircle(0,0,2);
+    } else {
+      // Caravan triangle with shadow
+      npc.graphics.fillStyle(0x000000,0.3);npc.graphics.fillTriangle(1,-4,-3,5,5,5);
+      npc.graphics.fillStyle(c,0.85);npc.graphics.fillTriangle(0,-5,-4,4,4,4);
+    }
     npc.graphics.setPosition(npc.x,npc.y);
   }
 
   drawPlayer(){
     this.playerGfx.clear();
-    this.playerGfx.fillStyle(0xffffff);
-    this.playerGfx.fillTriangle(0,-8,-6,6,6,6);
-    this.playerGfx.lineStyle(1.5,0xffdd44);
-    this.playerGfx.strokeTriangle(0,-8,-6,6,6,6);
+    // Soft glow rings
+    this.playerGfx.fillStyle(0xffdd44,0.06);this.playerGfx.fillCircle(0,0,15);
+    this.playerGfx.fillStyle(0xffdd44,0.12);this.playerGfx.fillCircle(0,0,10);
+    // Drop shadow
+    this.playerGfx.fillStyle(0x000000,0.35);this.playerGfx.fillTriangle(1,-7,-5,7,7,7);
+    // White body
+    this.playerGfx.fillStyle(0xffffff,0.95);this.playerGfx.fillTriangle(0,-8,-6,6,6,6);
+    // Gold outline
+    this.playerGfx.lineStyle(1.5,0xffdd44,1.0);this.playerGfx.strokeTriangle(0,-8,-6,6,6,6);
     this.playerGfx.setPosition(this.playerPos.x,this.playerPos.y);
   }
 
@@ -482,43 +572,69 @@ class WorldScene extends Phaser.Scene {
   // ---- HUD ----
   createHUD(){
     const cam=this.cameras.main;
-    this.hudBg=this.add.rectangle(cam.width/2,0,cam.width,44,0x000000,0.75).setOrigin(0.5,0).setScrollFactor(0).setDepth(200);
-    this.hudText=this.add.text(8,6,'',{fontSize:'11px',fontFamily:'monospace',color:'#eee'}).setScrollFactor(0).setDepth(201);
-    this.pauseLabel=this.add.text(cam.width/2,4,'⏸ PAUSED [SPACE]',{fontSize:'12px',fontFamily:'monospace',color:'#ff8',fontStyle:'bold'}).setOrigin(0.5,0).setScrollFactor(0).setDepth(201);
-    this.speedLabel=this.add.text(cam.width/2,20,'Speed: 1x [1/2/3]',{fontSize:'9px',fontFamily:'monospace',color:'#aaa'}).setOrigin(0.5,0).setScrollFactor(0).setDepth(201);
+    // Parchment-dark HUD bar
+    this.hudBg=this.add.rectangle(cam.width/2,0,cam.width,THEME.hud.height,THEME.hud.fill,THEME.hud.fillAlpha).setOrigin(0.5,0).setScrollFactor(0).setDepth(200);
+    // Bronze bottom border line
+    const hudLine=this.add.graphics().setScrollFactor(0).setDepth(201);
+    hudLine.lineStyle(1,THEME.panel.border,0.75);
+    hudLine.lineBetween(0,THEME.hud.height,cam.width,THEME.hud.height);
 
-    const bx=cam.width-8;
-    this.add.text(bx-90,8,'[P]arty',{fontSize:'11px',fontFamily:'monospace',color:'#8cf',backgroundColor:'#222',padding:{x:4,y:2}})
-      .setScrollFactor(0).setDepth(201).setInteractive({useHandCursor:true}).on('pointerdown',()=>this.showPartyPanel());
-    this.add.text(bx-35,8,'[I]nv',{fontSize:'11px',fontFamily:'monospace',color:'#fc8',backgroundColor:'#222',padding:{x:4,y:2}})
-      .setScrollFactor(0).setDepth(201).setInteractive({useHandCursor:true}).on('pointerdown',()=>this.showInventoryPanel());
+    this.hudText=this.add.text(10,7,'',{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}).setScrollFactor(0).setDepth(201);
+    this.pauseLabel=this.add.text(cam.width/2,5,'⏸  PAUSED  [SPACE]',{fontSize:'12px',fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}).setOrigin(0.5,0).setScrollFactor(0).setDepth(201);
+    this.speedLabel=this.add.text(cam.width/2,22,'Speed: 1x  [1/2/3]',{fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}).setOrigin(0.5,0).setScrollFactor(0).setDepth(201);
 
-    this.logText=this.add.text(8,cam.height-60,'',{fontSize:'9px',fontFamily:'monospace',color:'#ffa',wordWrap:{width:300}}).setScrollFactor(0).setDepth(201);
-    this.terrainTip=this.add.text(8,cam.height-14,'',{fontSize:'9px',fontFamily:'monospace',color:'#999'}).setScrollFactor(0).setDepth(201);
+    const bx=cam.width-10;
+    createStyledButton(this,bx-116,8,'Party',()=>this.showPartyPanel(),{depth:201,padX:8,padY:3});
+    createStyledButton(this,bx-54,8,'Inventory',()=>this.showInventoryPanel(),{depth:201,padX:8,padY:3});
+
+    this.logText=this.add.text(10,cam.height-58,'',{fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.gold,wordWrap:{width:320},stroke:'#000',strokeThickness:1}).setScrollFactor(0).setDepth(201);
+    this.terrainTip=this.add.text(10,cam.height-14,'',{fontSize:THEME.font.xs,fontFamily:THEME.font.mono,color:THEME.text.muted}).setScrollFactor(0).setDepth(201);
 
     // Minimap
-    this.minimapTex=this.add.renderTexture(cam.width-134,cam.height-104,126,96).setScrollFactor(0).setDepth(200);
+    const mw=THEME.minimap.w, mh=THEME.minimap.h;
+    const mx=cam.width-mw-THEME.spacing.pad, my=cam.height-mh-THEME.spacing.pad;
+    drawMinimapFrame(this,mx,my,mw,mh);
+    this.minimapTex=this.add.renderTexture(mx,my,mw,mh).setScrollFactor(0).setDepth(200);
+    drawMinimapBorder(this,mx,my,mw,mh);
     this.minimapGfx=this.make.graphics({add:false});
+    this._mmW=mw;this._mmH=mh;
     this.drawMinimap();
   }
 
   drawMinimap(){
+    const mw=this._mmW||THEME.minimap.w, mh=this._mmH||THEME.minimap.h;
     const g=this.minimapGfx;g.clear();
-    g.fillStyle(0x000000,0.6);g.fillRect(0,0,126,96);
-    for(let y=0;y<GRID_H;y+=6){for(let x=0;x<GRID_W;x+=6){
-      g.fillStyle(TERRAIN_BY_ID[this.terrainGrid[y*GRID_W+x]].color,0.8);
-      g.fillRect(x/GRID_W*126,y/GRID_H*96,4,4);
+    // Terrain — sample every 3 tiles for better resolution
+    for(let y=0;y<GRID_H;y+=3){for(let x=0;x<GRID_W;x+=3){
+      g.fillStyle(TERRAIN_BY_ID[this.terrainGrid[y*GRID_W+x]].color,0.85);
+      g.fillRect(x/GRID_W*mw,y/GRID_H*mh,2,2);
     }}
-    this.towns.forEach(t=>{g.fillStyle(0xffffff);g.fillRect(t.x/GRID_W*126-1,t.y/GRID_H*96-1,3,3);});
-    this.npcs.forEach(n=>{if(!n.alive)return;g.fillStyle(FACTION_COLORS[n.faction]||0x888888);g.fillCircle(n.x/MAP_W*126,n.y/MAP_H*96,1.5);});
-    g.fillStyle(0xffdd44);g.fillCircle(this.playerPos.x/MAP_W*126,this.playerPos.y/MAP_H*96,2.5);
-    g.lineStyle(1,0x555555);g.strokeRect(0,0,126,96);
+    // Town markers — faction color ring + white center
+    this.towns.forEach(t=>{
+      const tx=t.x/GRID_W*mw,ty=t.y/GRID_H*mh;
+      g.fillStyle(THEME.faction[t.faction]||0xffffff,0.8);g.fillRect(tx-2,ty-2,5,5);
+      g.fillStyle(0xffffff,0.9);g.fillRect(tx-1,ty-1,3,3);
+    });
+    // NPC dots
+    this.npcs.forEach(n=>{if(!n.alive)return;g.fillStyle(THEME.faction[n.faction]||0x888888,0.7);g.fillCircle(n.x/MAP_W*mw,n.y/MAP_H*mh,1.5);});
+    // Viewport rectangle
+    const cam=this.cameras.main;
+    const zoom=cam.zoom;
+    const vw=cam.width/zoom,vh=cam.height/zoom;
+    const vx=(this.playerPos.x-vw/2)/MAP_W*mw;
+    const vy=(this.playerPos.y-vh/2)/MAP_H*mh;
+    g.lineStyle(1,0xffffff,0.3);
+    g.strokeRect(clamp(vx,0,mw-2),clamp(vy,0,mh-2),clamp(vw/MAP_W*mw,4,mw),clamp(vh/MAP_H*mh,4,mh));
+    // Player marker — white halo + gold center
+    const ppx=this.playerPos.x/MAP_W*mw, ppy=this.playerPos.y/MAP_H*mh;
+    g.fillStyle(0xffffff,1.0);g.fillCircle(ppx,ppy,2.5);
+    g.fillStyle(0xffdd44,0.9);g.fillCircle(ppx,ppy,1.5);
     this.minimapTex.clear();this.minimapTex.draw(g);
   }
 
   updateHUD(){
     const tot=player.troops.reduce((s,t)=>s+t.count,0);
-    this.hudText.setText(`Gold:${player.gold} Troops:${tot} Pow:${calcPower(player)} Day:${this.day} Renown:${player.renown} Lv:${player.level}`);
+    this.hudText.setText(`Gold: ${player.gold}  ·  Troops: ${tot}  ·  Power: ${calcPower(player)}  ·  Day ${this.day}  ·  Renown: ${player.renown}  ·  Lv ${player.level}`);
     this.pauseLabel.setVisible(this.paused);
     this.speedLabel.setText(`Speed: ${this.gameSpeed}x [1/2/3]`);
     if(this.battleLog)this.logText.setText(this.battleLog);
@@ -654,11 +770,16 @@ class WorldScene extends Phaser.Scene {
 
   panelBg(w,h){
     const cam=this.cameras.main;const cx=cam.width/2,cy=cam.height/2;const objs=[];
-    objs.push(this.add.rectangle(cx,cy,cam.width,cam.height,0x000000,0.6).setScrollFactor(0).setDepth(300).setInteractive());
-    objs.push(this.add.rectangle(cx,cy,w,h,0x141424,0.95).setScrollFactor(0).setDepth(301));
-    objs.push(this.add.rectangle(cx,cy,w,h).setScrollFactor(0).setDepth(301).setStrokeStyle(2,0x444466));
-    const cl=this.add.text(cx+w/2-24,cy-h/2+6,'✕',{fontSize:'16px',color:'#f88',fontFamily:'monospace'}).setScrollFactor(0).setDepth(302).setInteractive({useHandCursor:true});
-    cl.on('pointerdown',()=>this.closePanel());objs.push(cl);
+    // Dim overlay
+    objs.push(this.add.rectangle(cx,cy,cam.width,cam.height,0x000000,THEME.panel.overlayAlpha).setScrollFactor(0).setDepth(300).setInteractive());
+    // Styled panel background
+    objs.push(drawPanelBg(this,cx,cy,w,h));
+    // Close button
+    const cl=this.add.text(cx+w/2-18,cy-h/2+7,'✕',{fontSize:'14px',color:THEME.text.muted,fontFamily:THEME.font.ui}).setScrollFactor(0).setDepth(302).setInteractive({useHandCursor:true});
+    cl.on('pointerover',()=>cl.setColor(THEME.text.red));
+    cl.on('pointerout',()=>cl.setColor(THEME.text.muted));
+    cl.on('pointerdown',()=>this.closePanel());
+    objs.push(cl);
     return{objs,cx,cy,w,h};
   }
 
@@ -668,37 +789,37 @@ class WorldScene extends Phaser.Scene {
     if(pd>60){this.battleLog=`Too far from ${town.name}!`;this.logTimer=0;return;}
     this.paused=true;
     const{objs,cx,cy,w,h}=this.panelBg(420,380);
-    const t=(txt,x,y,opts={})=>{const o=this.add.text(x,y,txt,{fontSize:'11px',fontFamily:'monospace',color:'#ccc',...opts}).setScrollFactor(0).setDepth(302);objs.push(o);return o;};
+    const t=(txt,x,y,opts={})=>{const o=this.add.text(x,y,txt,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary,...opts}).setScrollFactor(0).setDepth(302);objs.push(o);return o;};
 
-    t(`🏰 ${town.name} (${town.faction})`,cx,cy-h/2+20,{fontSize:'16px',color:'#ffd866',fontStyle:'bold'}).setOrigin(0.5);
-    let yy=cy-h/2+48;
-    t('📦 Market',cx-w/2+16,yy,{fontSize:'12px',color:'#8cf',fontStyle:'bold'});yy+=18;
+    t(`${town.name}  ·  ${town.faction}`,cx,cy-h/2+18,{fontSize:THEME.font.lg,color:THEME.text.gold,fontStyle:'bold'}).setOrigin(0.5);
+    let yy=cy-h/2+46;
+    t('Market',cx-w/2+16,yy,{fontSize:THEME.font.md,color:THEME.text.blue,fontStyle:'bold'});yy+=18;
 
     GOODS.forEach(g=>{
       const price=town.goods[g]+randInt(-3,3);
-      const row=t(`${g.padEnd(7)} ${price}g (have:${player.inventory[g]||0})`,cx-w/2+24,yy);
-      const bb=t('[Buy]',cx+80,yy,{color:'#4f4',backgroundColor:'#222',padding:{x:3,y:1}});
-      bb.setInteractive({useHandCursor:true}).on('pointerdown',()=>{
+      const row=t(`${g.padEnd(7)}  ${price}g  (have: ${player.inventory[g]||0})`,cx-w/2+24,yy);
+      const bb=createStyledButton(this,cx+88,yy,'Buy',()=>{
         const ap=Math.max(1,Math.round(price*(1-player.skills.trading*0.04)));
-        if(player.gold>=ap){player.gold-=ap;player.inventory[g]=(player.inventory[g]||0)+1;row.setText(`${g.padEnd(7)} ${price}g (have:${player.inventory[g]})`);}
-      });objs.push(bb);
-      const sb=t('[Sell]',cx+120,yy,{color:'#f84',backgroundColor:'#222',padding:{x:3,y:1}});
-      sb.setInteractive({useHandCursor:true}).on('pointerdown',()=>{
-        if((player.inventory[g]||0)>0){const sp=Math.max(1,Math.round(price*0.85*(1+player.skills.trading*0.04)));player.gold+=sp;player.inventory[g]--;row.setText(`${g.padEnd(7)} ${price}g (have:${player.inventory[g]})`);}
-      });objs.push(sb);
+        if(player.gold>=ap){player.gold-=ap;player.inventory[g]=(player.inventory[g]||0)+1;row.setText(`${g.padEnd(7)}  ${price}g  (have: ${player.inventory[g]})`);}
+      },{depth:303,padX:6,padY:2,fontSize:THEME.font.xs});
+      objs.push(bb);
+      const sb=createStyledButton(this,cx+128,yy,'Sell',()=>{
+        if((player.inventory[g]||0)>0){const sp=Math.max(1,Math.round(price*0.85*(1+player.skills.trading*0.04)));player.gold+=sp;player.inventory[g]--;row.setText(`${g.padEnd(7)}  ${price}g  (have: ${player.inventory[g]})`);}
+      },{depth:303,padX:6,padY:2,fontSize:THEME.font.xs});
+      objs.push(sb);
       yy+=16;
     });
     yy+=10;
-    const recLabel=t(`⚔ Recruit (Pool:${town.recruitPool})`,cx-w/2+16,yy,{fontSize:'12px',color:'#fc8',fontStyle:'bold'});yy+=18;
+    const recLabel=t(`Recruit  ·  Pool: ${town.recruitPool}`,cx-w/2+16,yy,{fontSize:THEME.font.md,color:THEME.text.orange,fontStyle:'bold'});yy+=18;
     TROOP_TIERS.forEach((tier,ti)=>{
-      t(`${tier.name.padEnd(9)} Pow:${tier.power} W:${tier.wage} $${tier.cost}`,cx-w/2+24,yy);
-      const hb=t('[Hire]',cx+110,yy,{color:'#4f4',backgroundColor:'#222',padding:{x:3,y:1}});
-      hb.setInteractive({useHandCursor:true}).on('pointerdown',()=>{
+      t(`${tier.name.padEnd(9)}  Pow: ${tier.power}  Wage: ${tier.wage}  Cost: ${tier.cost}g`,cx-w/2+24,yy,{color:THEME.text.muted});
+      const hb=createStyledButton(this,cx+110,yy,'Hire',()=>{
         if(player.gold>=tier.cost&&town.recruitPool>0){
-          player.gold-=tier.cost;town.recruitPool--;recLabel.setText(`⚔ Recruit (Pool:${town.recruitPool})`);
+          player.gold-=tier.cost;town.recruitPool--;recLabel.setText(`Recruit  ·  Pool: ${town.recruitPool}`);
           let ex=player.troops.find(t=>t.tier===ti);if(ex)ex.count++;else player.troops.push({tier:ti,count:1});
         }
-      });objs.push(hb);
+      },{depth:303,padX:6,padY:2,fontSize:THEME.font.xs});
+      objs.push(hb);
       yy+=16;
     });
     this.activePanel=objs;
@@ -707,39 +828,37 @@ class WorldScene extends Phaser.Scene {
   showPartyPanel(){
     if(this.activePanel)this.closePanel();this.paused=true;
     const{objs,cx,cy,w,h}=this.panelBg(360,280);
-    const t=(txt,x,y,opts={})=>{const o=this.add.text(x,y,txt,{fontSize:'11px',fontFamily:'monospace',color:'#ccc',...opts}).setScrollFactor(0).setDepth(302);objs.push(o);return o;};
-    t('⚔ Your Party',cx,cy-h/2+20,{fontSize:'15px',color:'#ffd866',fontStyle:'bold'}).setOrigin(0.5);
+    const t=(txt,x,y,opts={})=>{const o=this.add.text(x,y,txt,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary,...opts}).setScrollFactor(0).setDepth(302);objs.push(o);return o;};
+    t('Your Party',cx,cy-h/2+18,{fontSize:THEME.font.lg,color:THEME.text.gold,fontStyle:'bold'}).setOrigin(0.5);
     let yy=cy-h/2+46;
-    t(`Troops:${player.troops.reduce((s,t)=>s+t.count,0)} Power:${calcPower(player)} Lv:${player.level} XP:${player.xp}/${player.level*50}`,cx-w/2+16,yy,{color:'#aaa'});yy+=20;
-    player.troops.forEach(tr=>{const ti=TROOP_TIERS[tr.tier];t(`${ti.name.padEnd(9)} x${tr.count} (Pow:${ti.power*tr.count} Wage:${ti.wage*tr.count}/d)`,cx-w/2+24,yy);yy+=16;});
-    yy+=10;t('Skills:',cx-w/2+16,yy,{color:'#8cf',fontStyle:'bold'});yy+=16;
-    Object.entries(player.skills).forEach(([sk,v])=>{t(`${sk.padEnd(13)} Lv${v}`,cx-w/2+24,yy);yy+=14;});
+    t(`Troops: ${player.troops.reduce((s,t)=>s+t.count,0)}   Power: ${calcPower(player)}   Lv ${player.level}   XP: ${player.xp}/${player.level*50}`,cx-w/2+16,yy,{color:THEME.text.muted,fontSize:THEME.font.xs});yy+=20;
+    player.troops.forEach(tr=>{const ti=TROOP_TIERS[tr.tier];t(`${ti.name.padEnd(9)} ×${tr.count}   (Pow: ${ti.power*tr.count}  Wage: ${ti.wage*tr.count}/d)`,cx-w/2+24,yy);yy+=16;});
+    yy+=10;t('Skills',cx-w/2+16,yy,{color:THEME.text.blue,fontStyle:'bold'});yy+=16;
+    Object.entries(player.skills).forEach(([sk,v])=>{t(`${sk.padEnd(13)} Lv ${v}`,cx-w/2+24,yy,{color:THEME.text.muted});yy+=14;});
     this.activePanel=objs;
   }
 
   showInventoryPanel(){
     if(this.activePanel)this.closePanel();this.paused=true;
     const{objs,cx,cy}=this.panelBg(300,220);
-    const t=(txt,x,y,opts={})=>{const o=this.add.text(x,y,txt,{fontSize:'11px',fontFamily:'monospace',color:'#ccc',...opts}).setScrollFactor(0).setDepth(302);objs.push(o);return o;};
-    t('🎒 Inventory',cx,cy-90,{fontSize:'15px',color:'#ffd866',fontStyle:'bold'}).setOrigin(0.5);
-    let yy=cy-65;t(`Gold: ${player.gold}`,cx-120,yy,{color:'#ff4'});yy+=20;
-    GOODS.forEach(g=>{t(`${g.padEnd(9)} x${player.inventory[g]||0}`,cx-120,yy);yy+=16;});
+    const t=(txt,x,y,opts={})=>{const o=this.add.text(x,y,txt,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary,...opts}).setScrollFactor(0).setDepth(302);objs.push(o);return o;};
+    t('Inventory',cx,cy-90,{fontSize:THEME.font.lg,color:THEME.text.gold,fontStyle:'bold'}).setOrigin(0.5);
+    let yy=cy-65;t(`Gold:  ${player.gold}`,cx-120,yy,{color:THEME.text.gold});yy+=20;
+    GOODS.forEach(g=>{t(`${g.padEnd(9)} ×${player.inventory[g]||0}`,cx-120,yy);yy+=16;});
     this.activePanel=objs;
   }
 
   showLevelUpPanel(){
     if(this.activePanel)this.closePanel();this.paused=true;
     const{objs,cx,cy}=this.panelBg(340,260);
-    const t=(txt,x,y,opts={})=>{const o=this.add.text(x,y,txt,{fontSize:'11px',fontFamily:'monospace',color:'#ccc',...opts}).setScrollFactor(0).setDepth(302);objs.push(o);return o;};
-    t(`🎉 Level ${player.level}!`,cx,cy-110,{fontSize:'15px',color:'#ffd866',fontStyle:'bold'}).setOrigin(0.5);
-    t('Choose a skill:',cx,cy-88,{color:'#aaa'}).setOrigin(0.5);
+    const t=(txt,x,y,opts={})=>{const o=this.add.text(x,y,txt,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary,...opts}).setScrollFactor(0).setDepth(302);objs.push(o);return o;};
+    t(`Level ${player.level}!`,cx,cy-110,{fontSize:THEME.font.xl,color:THEME.text.gold,fontStyle:'bold'}).setOrigin(0.5);
+    t('Choose a skill to improve:',cx,cy-88,{color:THEME.text.muted,fontSize:THEME.font.xs}).setOrigin(0.5);
     let yy=cy-65;
     const desc={tactics:'+8% combat power',trading:'+4% buy/sell',leadership:'+capacity',pathfinding:'+6% map speed'};
     Object.entries(player.skills).forEach(([sk,v])=>{
-      const b=t(`${sk} (${v}→${v+1}): ${desc[sk]}`,cx,yy,{color:'#4f4',backgroundColor:'#222',padding:{x:8,y:4}});
-      b.setOrigin(0.5).setInteractive({useHandCursor:true});
-      b.on('pointerover',()=>b.setColor('#8f8'));b.on('pointerout',()=>b.setColor('#4f4'));
-      b.on('pointerdown',()=>{player.skills[sk]++;this.closePanel();});
+      const b=createStyledButton(this,cx,yy,`${sk}  (${v} → ${v+1})  —  ${desc[sk]}`,()=>{player.skills[sk]++;this.closePanel();},{depth:303,padX:12,padY:5});
+      b.setOrigin(0.5);objs.push(b);
       yy+=30;
     });
     this.activePanel=objs;
