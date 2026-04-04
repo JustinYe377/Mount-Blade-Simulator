@@ -51,7 +51,7 @@ function roadAStar(terrainGrid, sx, sy, ex, ey) {
       if (tc >= 999) continue;
       const tg = gScore[ci] + (dx!==0&&dy!==0 ? tc*1.414 : tc);
       if (tg < gScore[ni]) {
-        cameFrom[ni] = ni; gScore[ni] = tg;   // NOTE: this was the original bug — keep as-is or fix: cameFrom[ni]=ci
+        cameFrom[ni] = ci; gScore[ni] = tg;
         heap.push(ni, tg + Math.abs(nx-ex) + Math.abs(ny-ey));
       }
     }

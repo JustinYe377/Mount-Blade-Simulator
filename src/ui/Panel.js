@@ -1,80 +1,90 @@
-// Reusable UI drawing helpers — Pass 1 visual polish
-// Requires THEME (src/config.js) to be loaded before this file.
+// ============================================================
+// Panel.js — Reusable Phaser UI helper functions
+// Used by WorldScene panels, HUD, and minimap.
+// Depends on: config.js (THEME must be defined first)
+// ============================================================
 
-/** Draw a styled medieval panel background. Returns the graphics object. */
+/**
+ * Create a styled text button with hover/click effects.
+ * Returns the Phaser Text object (so callers can setPosition on it).
+ */
+function createStyledButton(scene, x, y, label, onClick, opts = {}) {
+  const depth  = opts.depth  ?? 301;
+  const padX   = opts.padX   ?? 10;
+  const padY   = opts.padY   ?? 5;
+  const fillHex = '#' + THEME.panel.fill.toString(16).padStart(6, '0');
+
+  const btn = scene.add.text(x, y, label, {
+    fontSize:        THEME.font.sm,
+    fontFamily:      THEME.font.ui,
+    color:           THEME.text.gold,
+    backgroundColor: fillHex,
+    padding:         { x: padX, y: padY },
+    stroke:          '#000000',
+    strokeThickness: 1,
+  })
+    .setScrollFactor(0)
+    .setDepth(depth)
+    .setInteractive({ useHandCursor: true });
+
+  btn.on('pointerover',  () => btn.setColor(THEME.text.primary));
+  btn.on('pointerout',   () => btn.setColor(THEME.text.gold));
+  btn.on('pointerdown',  () => { btn.setColor('#ffffff'); onClick(); });
+  btn.on('pointerup',    () => btn.setColor(THEME.text.gold));
+
+  return btn;
+}
+
+/**
+ * Draw a styled panel background (dark fill + border + inner highlight).
+ * Returns the Graphics object added to the scene.
+ */
 function drawPanelBg(scene, cx, cy, w, h) {
   const g = scene.add.graphics().setScrollFactor(0).setDepth(301);
-  // Drop shadow
-  g.fillStyle(0x000000, 0.4);
-  g.fillRect(cx - w/2 + 5, cy - h/2 + 5, w, h);
-  // Main panel fill
-  g.fillStyle(THEME.panel.fill, 0.97);
-  g.fillRect(cx - w/2, cy - h/2, w, h);
-  // Subtle top-edge highlight strip
-  g.fillStyle(THEME.panel.fillLight, 0.55);
-  g.fillRect(cx - w/2 + 2, cy - h/2 + 2, w - 4, 5);
-  // Outer bronze border
-  g.lineStyle(2, THEME.panel.border, 1.0);
-  g.strokeRect(cx - w/2, cy - h/2, w, h);
-  // Inner inset border
-  g.lineStyle(1, THEME.panel.borderInner, 0.85);
-  g.strokeRect(cx - w/2 + 3, cy - h/2 + 3, w - 6, h - 6);
-  // Gold divider line below title area
-  g.fillStyle(THEME.panel.accent, 0.65);
-  g.fillRect(cx - w/2 + 12, cy - h/2 + 36, w - 24, 1);
+
+  // Outer shadow
+  g.fillStyle(0x000000, 0.6);
+  g.fillRoundedRect(cx - w/2 + 4, cy - h/2 + 4, w, h, THEME.panel.radius);
+
+  // Main fill
+  g.fillStyle(THEME.panel.fill, THEME.panel.fillAlpha);
+  g.fillRoundedRect(cx - w/2, cy - h/2, w, h, THEME.panel.radius);
+
+  // Border
+  g.lineStyle(1.5, THEME.panel.border, 0.9);
+  g.strokeRoundedRect(cx - w/2, cy - h/2, w, h, THEME.panel.radius);
+
+  // Inner highlight (top edge only)
+  g.lineStyle(1, THEME.panel.borderBright, 0.25);
+  g.strokeRoundedRect(cx - w/2 + 1, cy - h/2 + 1, w - 2, h - 2, THEME.panel.radius);
+
+  // Title bar separator
+  g.lineStyle(1, THEME.panel.border, 0.5);
+  g.lineBetween(cx - w/2 + 10, cy - h/2 + 36, cx + w/2 - 10, cy - h/2 + 36);
+
   return g;
 }
 
 /**
- * Create a styled button with hover and press states.
- * Returns the Phaser Text object — caller must push it to the panel's objs array.
+ * Draw the dark background frame behind the minimap.
  */
-function createStyledButton(scene, x, y, label, onClick, opts) {
-  opts = opts || {};
-  const depth      = opts.depth      !== undefined ? opts.depth      : 302;
-  const fontSize   = opts.fontSize   || THEME.font.sm;
-  const fontFamily = opts.fontFamily || THEME.font.ui;
-  const padX       = opts.padX       !== undefined ? opts.padX       : 10;
-  const padY       = opts.padY       !== undefined ? opts.padY       : 4;
-
-  const fillHex  = '#' + THEME.btn.fill.toString(16).padStart(6, '0');
-  const hoverHex = '#' + THEME.btn.fillHover.toString(16).padStart(6, '0');
-  const pressHex = '#' + THEME.btn.fillPressed.toString(16).padStart(6, '0');
-
-  const btn = scene.add.text(x, y, label, {
-    fontSize, fontFamily,
-    color: THEME.btn.textNormal,
-    backgroundColor: fillHex,
-    padding: { x: padX, y: padY },
-  }).setScrollFactor(0).setDepth(depth).setInteractive({ useHandCursor: true });
-
-  btn.on('pointerover',  () => { btn.setColor(THEME.btn.textHover);  btn.setBackgroundColor(hoverHex); });
-  btn.on('pointerout',   () => { btn.setColor(THEME.btn.textNormal); btn.setBackgroundColor(fillHex);  });
-  btn.on('pointerdown',  () => { btn.setBackgroundColor(pressHex); if (onClick) onClick(); });
-  btn.on('pointerup',    () => { btn.setBackgroundColor(hoverHex); });
-  return btn;
-}
-
-/** Draw shadow + background behind the minimap render texture (depth 199). */
-function drawMinimapFrame(scene, x, y, w, h) {
+function drawMinimapFrame(scene, mx, my, mw, mh) {
   const g = scene.add.graphics().setScrollFactor(0).setDepth(199);
-  // Outer shadow
   g.fillStyle(0x000000, 0.55);
-  g.fillRect(x - 3, y - 3, w + 6, h + 6);
-  // Background fill (behind the RenderTexture)
+  g.fillRect(mx - 3, my - 3, mw + 6, mh + 6);
   g.fillStyle(THEME.minimap.bg, 1.0);
-  g.fillRect(x, y, w, h);
+  g.fillRect(mx, my, mw, mh);
   return g;
 }
 
-/** Draw a border overlay on top of the minimap render texture (depth 202). */
-function drawMinimapBorder(scene, x, y, w, h) {
-  const g = scene.add.graphics().setScrollFactor(0).setDepth(202);
-  // Outer bronze border
+/**
+ * Draw the two-tone border around the minimap.
+ */
+function drawMinimapBorder(scene, mx, my, mw, mh) {
+  const g = scene.add.graphics().setScrollFactor(0).setDepth(201);
   g.lineStyle(2, THEME.minimap.frame, 1.0);
-  g.strokeRect(x - 1, y - 1, w + 2, h + 2);
-  // Inner inset line
+  g.strokeRect(mx - 1, my - 1, mw + 2, mh + 2);
   g.lineStyle(1, THEME.minimap.frameInner, 0.85);
-  g.strokeRect(x + 1, y + 1, w - 2, h - 2);
+  g.strokeRect(mx + 1, my + 1, mw - 2, mh - 2);
   return g;
 }

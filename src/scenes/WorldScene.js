@@ -231,11 +231,9 @@ class WorldScene extends Phaser.Scene {
         towns.some(t => Math.abs(t.x-gx)+Math.abs(t.y-gy)<minD)
       ));
       towns.push({
-        name:factions[i], x:gx, y:gy, faction:factions[i], tier:tiers[i]||0,
-        // override name properly
-        ...(()=>({ name:names[i] }))(),
-        goods:{ grain:randInt(8,30), iron:randInt(10,55), cloth:randInt(10,40), fish:randInt(5,35) },
-        recruitPool: randInt(5,12)
+        name: names[i], x: gx, y: gy, faction: factions[i], tier: tiers[i] || 0,
+        goods: { grain:randInt(8,30), iron:randInt(10,55), cloth:randInt(10,40), fish:randInt(5,35) },
+        recruitPool: randInt(5,12),
       });
     }
     return towns;
