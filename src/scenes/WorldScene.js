@@ -211,7 +211,7 @@ class WorldScene extends Phaser.Scene {
     this.input.keyboard.addKey('SPACE').on('down', ()=>this.togglePause());
     this.input.keyboard.addKey('P').on('down',     ()=>this.showPartyPanel());
     this.input.keyboard.addKey('I').on('down',     ()=>this.showInventoryPanel());
-    this.input.keyboard.addKey('ESC').on('down',   ()=>this.closePanel());
+    this.input.keyboard.addKey('ESC').on('down',   ()=>this.onEscKey());
     this.input.keyboard.addKey('ONE').on('down',   ()=>this.gameSpeed=1);
     this.input.keyboard.addKey('TWO').on('down',   ()=>this.gameSpeed=2);
     this.input.keyboard.addKey('THREE').on('down', ()=>this.gameSpeed=4);
@@ -1486,12 +1486,12 @@ class WorldScene extends Phaser.Scene {
         break;
       }
       default: {
-        // Caravan — respawn at home town
-        const townList = this.towns.filter(t=>t.type==='town');
-        const ct = npc.homeTown || randPick(townList.length ? townList : this.towns);
+        // Caravan — respawn at home settlement (town or castle, not village)
+        const hubs = this.towns.filter(t=>t.type!=='village');
+        const ct = npc.homeTown || randPick(hubs.length ? hubs : this.towns);
         npc.x=ct.x*TILE+TILE/2; npc.y=ct.y*TILE+TILE/2;
         npc.troops   = caravanTroops();
-        npc.destTown = randPick(townList.filter(t=>t!==ct).length ? townList.filter(t=>t!==ct) : townList);
+        npc.destTown = randPick((hubs.filter(t=>t!==ct).length ? hubs.filter(t=>t!==ct) : hubs));
         npc.cargo    = this._caravanLoadCargo(ct);
         break;
       }
@@ -1521,10 +1521,19 @@ class WorldScene extends Phaser.Scene {
     });
 
     // Village production — add goods to village stock each day
-    this.towns.filter(t => t.type==='village').forEach(v => {
+    this.towns.filter(t => t.type==='village' || t.tier===0).forEach(v => {
       (v.production||[]).forEach(good => {
         const rate = Math.max(1, Math.round((v.prosperity||50)/30));
         v.goods[good] = Math.min(60, (v.goods[good]||0) + randInt(1, rate));
+      });
+    });
+
+    // All settlements: slow goods consumption (population uses goods daily)
+    this.towns.forEach(t => {
+      GOODS.forEach(g => {
+        if ((t.goods[g]||0) > 0 && Math.random() < 0.3) {
+          t.goods[g] = Math.max(0, t.goods[g] - 1);
+        }
       });
     });
 
@@ -1548,11 +1557,23 @@ class WorldScene extends Phaser.Scene {
 
   // ---- Panels ----
   closePanel() {
-    if (this.activePanel) { this.activePanel.forEach(o=>o.destroy()); this.activePanel=null; }
-    // If player is inside a settlement, reopen the menu (ESC closes sub-panels, not the settlement itself)
-    if (this.playerInside && this.playerInsideSett && !this.stayMode) {
-      // Use a short delay so current destroy cycle completes before rebuilding
-      this.time.delayedCall(10, ()=>this.showSettlementMenu(this.playerInsideSett));
+    if (this.activePanel) {
+      this.activePanel.forEach(o => { try { o.destroy(); } catch(e){} });
+      this.activePanel = null;
+    }
+  }
+
+  // ESC key: close sub-panel → if inside settlement, return to its main menu
+  onEscKey() {
+    const wasInside = this.playerInside && this.playerInsideSett;
+    const wasInStay = this.stayMode;
+    if (wasInStay) {
+      this.endStay(this.playerInsideSett);
+      return;
+    }
+    this.closePanel();
+    if (wasInside) {
+      this.showSettlementMenu(this.playerInsideSett);
     }
   }
 
@@ -1593,7 +1614,7 @@ class WorldScene extends Phaser.Scene {
     objs.push(banner);
 
     // Title
-    const typeLabel = sett.type==='castle' ? 'Castle' : sett.tier===2 ? 'City' : 'Town';
+    const typeLabel = sett.type==='village' ? 'Village' : sett.type==='castle' ? 'Castle' : sett.tier===2 ? 'City' : 'Town';
     d.add(this.add.text(tl, top+10, sett.name, {fontSize:THEME.font.lg,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}));
     d.add(this.add.text(tl, top+32, `${typeLabel}  ·  ${sett.faction}`, {fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}));
 
@@ -1615,43 +1636,97 @@ class WorldScene extends Phaser.Scene {
     this.activePanel = objs;
   }
 
+  // ---- Market price calculation ----
+  // Prices are dynamic: low supply → high price, high supply → low price.
+  // Safety and prosperity modulate demand. Villages have surplus of their
+  // production goods (cheap there), deficit of others (expensive).
+  _marketPrice(sett, good) {
+    const BASE = { grain:8, iron:15, cloth:12, fish:10 };
+    const base = BASE[good] || 10;
+    const stock = sett.goods[good] || 0;
+    const maxStock = 60;
+    // Supply factor: 0 stock → +80% price; maxStock stock → −40%
+    const supplyMod = 1.0 + ((maxStock - stock) / maxStock) * 1.2 - 0.4;
+    // Demand factor: low safety/prosperity → people need goods more
+    const demandMod = 1.0 + (1 - (sett.safety||100)/100) * 0.3
+                          + (1 - (sett.prosperity||50)/100) * 0.2;
+    // Village surplus: if this is a production good here, it's cheap
+    const isProdHere = (sett.production||[]).includes(good);
+    const prodMod = isProdHere ? 0.6 : 1.0;
+    const raw = Math.round(base * supplyMod * demandMod * prodMod);
+    return Math.max(2, raw);
+  }
+
   showTradePanel(sett) {
     this.closePanel();
-    const pw=460, ph=380;
+    const pw=520, ph=420;
     const {objs,cx,cy} = this.panelBg(pw,ph);
     const d = this.add.container(0,0).setScrollFactor(0).setDepth(301);
     const tl=cx-pw/2+20, top=cy-ph/2;
 
-    d.add(this.add.text(tl,top+12,`Trade — ${sett.name}`,{fontSize:THEME.font.lg,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}));
-    let gy=top+42;
+    d.add(this.add.text(tl, top+12, `Market — ${sett.name}`, {fontSize:THEME.font.lg,fontFamily:THEME.font.ui,color:THEME.text.gold,fontStyle:'bold'}));
+    d.add(this.add.text(tl, top+36, `Prosperity: ${sett.prosperity}   Safety: ${Math.round(sett.safety||100)}`,
+      {fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}));
+
+    // Column headers
+    let gy=top+58;
+    const colGood=tl, colStock=tl+120, colBuy=tl+185, colSell=tl+265, colInv=tl+360;
+    d.add(this.add.text(colGood,  gy, 'Good',       {fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}));
+    d.add(this.add.text(colStock, gy, 'Stock',      {fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}));
+    d.add(this.add.text(colBuy,   gy, 'Buy',        {fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}));
+    d.add(this.add.text(colSell,  gy, 'Sell',       {fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}));
+    d.add(this.add.text(colInv,   gy, 'You have',   {fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}));
+    gy+=18;
+
+    // Divider
+    const divG = this.add.graphics().setScrollFactor(0).setDepth(302);
+    divG.lineStyle(1,THEME.panel.border,0.4); divG.lineBetween(tl,gy,cx+pw/2-20,gy);
+    objs.push(divG); gy+=8;
 
     GOODS.forEach(good => {
-      const stock=sett.goods[good]||0;
-      const price=Math.round(10+60/Math.max(1,stock));
-      const sellPrice=Math.round(price*0.6);
-      d.add(this.add.text(tl,gy,`${good}: ${stock}  buy ${price}g`,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
-      const buyBtn = createStyledButton(this,tl+200,gy,'Buy 1',()=>{
-        if(player.gold<price){this.showNotification('Not enough gold!');return;}
-        player.gold-=price; player.inventory[good]=(player.inventory[good]||0)+1;
-        sett.goods[good]=Math.max(0,(sett.goods[good]||0)-1);
-        this.showNotification(`Bought ${good} for ${price}g`);
+      const stock    = sett.goods[good] || 0;
+      const buyPrice = this._marketPrice(sett, good);
+      const sellPrice= Math.max(1, Math.round(buyPrice * 0.62));
+      const invQty   = player.inventory[good] || 0;
+      const isProd   = (sett.production||[]).includes(good);
+      const stockColor = stock < 5 ? THEME.text.red : stock > 30 ? THEME.text.green : THEME.text.primary;
+      const goodLabel  = isProd ? `★ ${good}` : good;
+
+      d.add(this.add.text(colGood,  gy, goodLabel,        {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:isProd?THEME.text.gold:THEME.text.primary}));
+      d.add(this.add.text(colStock, gy, `${stock}`,        {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:stockColor}));
+      d.add(this.add.text(colBuy,   gy, `${buyPrice}g`,    {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
+      d.add(this.add.text(colSell,  gy, `${sellPrice}g`,   {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted}));
+      d.add(this.add.text(colInv,   gy, `${invQty}`,        {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:invQty>0?THEME.text.gold:THEME.text.muted}));
+
+      // Buy button
+      d.add(createStyledButton(this, colBuy+36, gy-2, '+1', ()=>{
+        if(player.gold < buyPrice){ this.showNotification('Not enough gold!'); return; }
+        player.gold -= buyPrice;
+        player.inventory[good] = (player.inventory[good]||0) + 1;
+        sett.goods[good] = Math.max(0, (sett.goods[good]||0) - 1);
+        this.showNotification(`Bought ${good} for ${buyPrice}g`);
         this.showTradePanel(sett);
-      },{depth:302,padX:6,padY:2});
-      d.add(buyBtn);
-      if((player.inventory[good]||0)>0){
-        const sellBtn=createStyledButton(this,tl+270,gy,`Sell (${sellPrice}g)`,()=>{
-          player.inventory[good]--; player.gold+=sellPrice;
-          sett.goods[good]=(sett.goods[good]||0)+1;
-          sett.prosperity=Math.min(100,(sett.prosperity||0)+1);
+      }, {depth:302,padX:5,padY:2}));
+
+      // Sell button (only if player has inventory)
+      if (invQty > 0) {
+        d.add(createStyledButton(this, colSell+36, gy-2, '-1', ()=>{
+          player.inventory[good]--;
+          player.gold += sellPrice;
+          sett.goods[good] = (sett.goods[good]||0) + 1;
+          sett.prosperity = Math.min(100, (sett.prosperity||50) + 1);
           this.showNotification(`Sold ${good} for ${sellPrice}g`);
           this.showTradePanel(sett);
-        },{depth:302,padX:6,padY:2});
-        d.add(sellBtn);
+        }, {depth:302,padX:5,padY:2}));
       }
-      gy+=22;
+      gy+=24;
     });
 
-    // Back button
+    // Profit tip
+    gy += 4;
+    d.add(this.add.text(tl, gy, '★ = produced here (surplus, cheaper)   Low stock → higher price',
+      {fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}));
+
     d.add(createStyledButton(this,cx,top+ph-44,'← Back',()=>this.showSettlementMenu(sett),{depth:302,padX:16,padY:8}));
     objs.push(d);
     this.activePanel = objs;

@@ -11,6 +11,19 @@ Visual language established in the first polish pass. All future UI work should 
 - **No raw debug text** — bracket labels like `[Buy]`, `[Inv]`, `[P]arty` replaced with clean serif-font buttons; section headers use size/color hierarchy instead of emoji prefixes
 - **Theme source of truth** — `src/config.js` exports the `THEME` object; `src/ui/Panel.js` exports the four drawing helpers (`drawPanelBg`, `createStyledButton`, `drawMinimapFrame`, `drawMinimapBorder`). Change a color in one place, it propagates everywhere.
 
+## Pass A–E  World Simulation (Bannerlord overworld core)
+
+Basic living-world simulation layer on top of the visual map.
+
+- **Villages as production nodes** — each village (tier 0) is bound to its nearest town/city. Villages generate 1–2 goods per day (`production[]`, rate scales with `prosperity`). `goods` dict accumulates on the village object.
+- **Villager parties** — one per village. Carry goods from their village to the `boundTown`, update town stock and recruitPool on delivery, reload cargo and return home. Loop indefinitely. Bandits can raid and loot their cargo.
+- **Caravan trade loop** — one caravan per town/city (tier ≥ 1). Loads the highest-stock good from home town (reducing town stock), travels to a random destination, delivers cargo (adding to dest stock, boosting prosperity), picks a new destination and reloads. Creates real supply-demand flow.
+- **Lord AI state machine** — lords have four states decided daily: `recruit` (troops < 15 → move to nearest friendly town and hire militia), `defend` (enemy/bandit within 180px of friendly settlement → intercept), `attack` (war faction, 25% chance → move toward enemy territory), `patrol` (default, wander near faction towns). All states drive `npcPickTarget` routing.
+- **Faction war/peace** — `FACTION_RELATIONS` matrix in config.js. Kingdom vs Empire vs Rebels at war; Rebels and Bandits at peace with each other. `factionsAtWar(f1,f2)` used by NPC-vs-NPC battle loop and `isHostile()`. Player's faction (`player.faction='Kingdom'`) determines who is a hostile encounter vs who offers trade/social options.
+- **Settlement safety** — each settlement has a `safety` value (0–100) that decays when hostile parties are nearby and regenerates daily. Displayed in the town panel.
+- **Troop XP and upgrades** — `player.troopXP[id]` accumulates after wins (proportional to enemy losses). Town panel shows an "Upgrade Troops" section with XP progress and a gold cost to promote any ready troop stack to the next tier. Upgrade paths: Villager→Militia→Footman→Man-at-Arms, Scout Cavalry→Light Cavalry→Knight, Archer→Trained Archer→Longbowman.
+- **Sell goods in town** — town panel now shows both Buy and Sell buttons. Selling adds stock to the town and boosts prosperity slightly.
+
 ## Pass 2 World Realism
 
 Focused improvements to roads, biome coherence, and settlement hierarchy. No new gameplay systems added.
