@@ -19,6 +19,7 @@ const config = {
     height:        window.innerHeight,
   },
   scene: [
+    IntroScene,   // shown first; transitions to WorldScene on completion
     WorldScene,
     // Future scenes go here, e.g.:
     // BattleScene,

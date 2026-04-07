@@ -3,7 +3,7 @@
 // troops use {id, count} where id maps to TROOP_BY_ID
 // ============================================================
 const player = {
-  gold:      800,
+  gold:      200000,
   faction:   'Varric League',
   troops:    [{id:0, count:8}, {id:1, count:5}],   // 8 Villagers + 5 Militia
   inventory: { grain:0, iron:0, cloth:0, fish:0 },
