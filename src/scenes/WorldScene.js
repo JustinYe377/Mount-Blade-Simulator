@@ -117,12 +117,15 @@ class WorldScene extends Phaser.Scene {
     this.renderTerrain();
     this.renderTerrainOverlays();
     this.drawSettlements();
+    this.drawFactionTerritories();
 
     // Pathfinder
     this.pathfinder = new AStar(this.costGrid, GRID_W, GRID_H);
 
     // Player sprite — start at Highcourt (Varric League capital)
-    this.playerGfx = this.add.graphics().setDepth(50);
+    this.playerAuraGfx = this.add.graphics().setDepth(48);
+    this.playerGfx     = this.add.graphics().setDepth(50);
+    this._animT        = 0;
     const st = this.towns.find(t => t.id === 'highcourt') || this.towns[0];
     this.playerPos  = { x: st.x*TILE+TILE/2, y: st.y*TILE+TILE/2 };
     this.playerPath = [];
@@ -403,19 +406,21 @@ class WorldScene extends Phaser.Scene {
       const g     = this.add.graphics().setDepth(30);
 
       if (tier===0) {
-        // Village — modest square (smallest settlement)
-        g.fillStyle(fc,0.12); g.fillCircle(px,py,20);
+        // Village — modest square
+        g.fillStyle(fc,0.06); g.fillCircle(px,py,28);
+        g.fillStyle(fc,0.13); g.fillCircle(px,py,18);
         g.fillStyle(0xb8a070); g.fillRect(px-9,py-9,18,18);
         g.lineStyle(2,fc,0.65); g.strokeRect(px-9,py-9,18,18);
         this.add.text(px,py+13,t.name,{fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted,stroke:'#000',strokeThickness:2}).setOrigin(0.5,0).setDepth(31);
         const zone = this.add.zone(px,py,44,44).setInteractive({useHandCursor:true}).setDepth(55);
-        zone.on('pointerover',()=>{hover.clear();hover.fillStyle(0xffffff,0.10);hover.fillCircle(px,py,22);});
+        zone.on('pointerover',()=>{ hover.clear(); hover.fillStyle(0xffffff,0.08); hover.fillCircle(px,py,22); hover.lineStyle(1.5,fc,0.65); hover.strokeCircle(px,py,22); });
         zone.on('pointerout', ()=>hover.clear());
         zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterSettlement(t);});
 
       } else if (t.type === 'castle') {
-        // Castle — keep with 4 prominent corner towers (bigger than village, smaller than town)
-        g.fillStyle(fc,0.15); g.fillCircle(px,py,34);
+        // Castle — keep with 4 prominent corner towers
+        g.fillStyle(fc,0.06); g.fillCircle(px,py,50);
+        g.fillStyle(fc,0.14); g.fillCircle(px,py,34);
         g.fillStyle(0x9a8060); g.fillRect(px-15,py-15,30,30);       // main keep
         g.fillStyle(0x7a6040);                                         // corner towers
         g.fillRect(px-22,py-22,13,13); g.fillRect(px+9,py-22,13,13);
@@ -427,13 +432,14 @@ class WorldScene extends Phaser.Scene {
         g.fillStyle(0x1a1208); g.fillRect(px-4,py+4,8,11);          // gate arch
         this.add.text(px,py+26,t.name,{fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted,stroke:'#000',strokeThickness:2}).setOrigin(0.5,0).setDepth(31);
         const zone = this.add.zone(px,py,72,72).setInteractive({useHandCursor:true}).setDepth(55);
-        zone.on('pointerover',()=>{hover.clear();hover.fillStyle(0xffffff,0.12);hover.fillCircle(px,py,38);});
+        zone.on('pointerover',()=>{ hover.clear(); hover.fillStyle(0xffffff,0.09); hover.fillCircle(px,py,38); hover.lineStyle(1.5,fc,0.7); hover.strokeCircle(px,py,38); });
         zone.on('pointerout', ()=>hover.clear());
         zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterSettlement(t);});
 
       } else if (tier===1) {
-        // Town — walled castle with 3 crenellated merlons (bigger than castle)
-        g.fillStyle(fc,0.18); g.fillCircle(px,py,42);
+        // Town — walled castle with 3 crenellated merlons
+        g.fillStyle(fc,0.07); g.fillCircle(px,py,60);
+        g.fillStyle(fc,0.17); g.fillCircle(px,py,42);
         g.fillStyle(0xd4c090); g.fillRect(px-16,py-14,32,28);
         g.fillStyle(0xb89a60);
         g.fillRect(px-16,py-22,9,8); g.fillRect(px-5, py-22,9,8); g.fillRect(px+7, py-22,9,8);
@@ -441,14 +447,15 @@ class WorldScene extends Phaser.Scene {
         g.fillStyle(0x1a1208); g.fillRect(px-4,py+4,8,10);           // gate
         this.add.text(px,py+20,t.name,{fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.gold,stroke:'#000',strokeThickness:2}).setOrigin(0.5,0).setDepth(31);
         const zone = this.add.zone(px,py,88,88).setInteractive({useHandCursor:true}).setDepth(55);
-        zone.on('pointerover',()=>{hover.clear();hover.fillStyle(0xffffff,0.14);hover.fillCircle(px,py,46);});
+        zone.on('pointerover',()=>{ hover.clear(); hover.fillStyle(0xffffff,0.10); hover.fillCircle(px,py,46); hover.lineStyle(2,fc,0.75); hover.strokeCircle(px,py,46); });
         zone.on('pointerout', ()=>hover.clear());
         zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterSettlement(t);});
 
       } else {
-        // City — grand walled keep with 5 merlons, double glow ring, gold cap (largest)
-        g.fillStyle(fc,0.08); g.fillCircle(px,py,58);
-        g.fillStyle(fc,0.22); g.fillCircle(px,py,42);
+        // City — grand walled keep with 5 merlons, triple glow ring, gold cap (largest)
+        g.fillStyle(fc,0.04); g.fillCircle(px,py,80);
+        g.fillStyle(fc,0.09); g.fillCircle(px,py,58);
+        g.fillStyle(fc,0.22); g.fillCircle(px,py,40);
         g.fillStyle(0xe8d898); g.fillRect(px-21,py-18,42,36);
         g.fillStyle(0xf4e8a8,0.45); g.fillRect(px-18,py-18,36,6);
         g.fillStyle(0xc8a860);
@@ -459,7 +466,7 @@ class WorldScene extends Phaser.Scene {
         g.fillStyle(0x1a1208); g.fillRect(px-6,py+8,12,10);          // main gate
         this.add.text(px,py+26,t.name,{fontSize:THEME.font.md,fontFamily:THEME.font.ui,color:THEME.text.gold,stroke:'#000',strokeThickness:3,fontStyle:'bold'}).setOrigin(0.5,0).setDepth(31);
         const zone = this.add.zone(px,py,116,116).setInteractive({useHandCursor:true}).setDepth(55);
-        zone.on('pointerover',()=>{hover.clear();hover.fillStyle(0xffffff,0.12);hover.fillCircle(px,py,54);});
+        zone.on('pointerover',()=>{ hover.clear(); hover.fillStyle(0xffffff,0.08); hover.fillCircle(px,py,56); hover.lineStyle(2,fc,0.8); hover.strokeCircle(px,py,56); });
         zone.on('pointerout', ()=>hover.clear());
         zone.on('pointerdown',(ptr)=>{ptr.event.stopPropagation();this.enterSettlement(t);});
       }
@@ -511,24 +518,35 @@ class WorldScene extends Phaser.Scene {
     // --- sprite (all sizes smaller than smallest settlement = village at 18px) ---
     const g = npc.graphics;
     if (npc.type==='lord') {
-      // 14×14 box with gold border — clearly a military unit
-      g.fillStyle(0x000000,0.4); g.fillRect(-6,-6,14,14);
-      g.fillStyle(c,0.9);        g.fillRect(-7,-7,14,14);
-      g.lineStyle(2,0xffd866,0.9); g.strokeRect(-7,-7,14,14);
+      // Military unit — coloured box with gold border + faction pennant
+      g.fillStyle(0x000000,0.45); g.fillRect(-5,-5,15,15);
+      g.fillStyle(c,0.92);        g.fillRect(-7,-7,14,14);
+      g.lineStyle(2,0xffd866,0.95); g.strokeRect(-7,-7,14,14);
+      // Flag pole
+      g.lineStyle(1.5,0xd4b860,0.9); g.lineBetween(7,-7,7,-22);
+      // Pennant
+      g.fillStyle(c,0.95);        g.fillTriangle(7,-22,7,-14,16,-18);
+      g.lineStyle(1,0xffd866,0.7); g.strokeTriangle(7,-22,7,-14,16,-18);
     } else if (npc.type==='bandit') {
-      // 9px radius skull circle
-      g.fillStyle(0x000000,0.45); g.fillCircle(2,2,9);
-      g.fillStyle(c,0.85);        g.fillCircle(0,0,9);
-      g.fillStyle(0x000000,0.5);  g.fillCircle(0,0,4);
+      // Skull — dark red circle with hollow eye sockets
+      g.fillStyle(0x000000,0.5);  g.fillCircle(2,2,10);
+      g.fillStyle(0x991111,0.92); g.fillCircle(0,0,9);
+      g.fillStyle(0x000000,0.75); g.fillCircle(-3,-2,3);   // left eye
+      g.fillStyle(0x000000,0.75); g.fillCircle(3,-2,3);    // right eye
+      g.fillStyle(0x440000,0.6);  g.fillRect(-3,3,7,3);    // jaw
     } else if (npc.type==='villager') {
-      // 9×9 humble brown square
-      g.fillStyle(0x000000,0.3); g.fillRect(-4,-4,10,10);
-      g.fillStyle(0xc8a060,0.9); g.fillRect(-5,-5,10,10);
-      g.lineStyle(1.5,c,0.6); g.strokeRect(-5,-5,10,10);
+      // Humble peasant — earthy circle
+      g.fillStyle(0x000000,0.30); g.fillCircle(1,1,8);
+      g.fillStyle(0x8b6040,0.92); g.fillCircle(0,0,7);
+      g.lineStyle(1.5,c,0.55);    g.strokeCircle(0,0,7);
     } else {
-      // caravan — 10px triangle
-      g.fillStyle(0x000000,0.3); g.fillTriangle(1,-8,-7,8,9,8);
-      g.fillStyle(c,0.85);       g.fillTriangle(0,-9,-8,7,8,7);
+      // Caravan — wagon body + wheels
+      g.fillStyle(0x000000,0.35); g.fillRect(-9,-4,19,12);
+      g.fillStyle(c,0.88);        g.fillRect(-10,-5,18,9);
+      g.lineStyle(1.5,0xffd866,0.5); g.strokeRect(-10,-5,18,9);
+      // Wheels
+      g.fillStyle(0x553311,0.9);  g.fillCircle(-6,5,4); g.fillCircle(6,5,4);
+      g.lineStyle(1,0x886644,0.8); g.strokeCircle(-6,5,4); g.strokeCircle(6,5,4);
     }
     g.setPosition(npc.x, npc.y);
 
@@ -598,12 +616,29 @@ class WorldScene extends Phaser.Scene {
 
   drawPlayer() {
     this.playerGfx.clear();
-    this.playerGfx.fillStyle(0xffdd44,0.06); this.playerGfx.fillCircle(0,0,20);
-    this.playerGfx.fillStyle(0xffdd44,0.14); this.playerGfx.fillCircle(0,0,14);
     this.playerGfx.fillStyle(0x000000,0.35); this.playerGfx.fillTriangle(1,-11,-8,10,10,10);
     this.playerGfx.fillStyle(0xffffff,0.95); this.playerGfx.fillTriangle(0,-12,-9,9,9,9);
     this.playerGfx.lineStyle(2,0xffdd44,1.0); this.playerGfx.strokeTriangle(0,-12,-9,9,9,9);
     this.playerGfx.setPosition(this.playerPos.x, this.playerPos.y);
+  }
+
+  _drawPlayerAura() {
+    const t     = this._animT;
+    const pulse = 0.5 + 0.5 * Math.sin(t * 2.5);
+    const g     = this.playerAuraGfx;
+    g.clear();
+    g.setPosition(this.playerPos.x, this.playerPos.y);
+    // Outer soft glow
+    g.fillStyle(0xffdd44, 0.04 + pulse * 0.04);
+    g.fillCircle(0, 0, 28 + pulse * 5);
+    // Inner warm halo
+    g.fillStyle(0xffdd44, 0.10 + pulse * 0.08);
+    g.fillCircle(0, 0, 16);
+    // Moving: show a thin travel ring
+    if (this.playerPath && this.playerPath.length > 0) {
+      g.lineStyle(1.5, 0xffdd44, 0.18 + pulse * 0.18);
+      g.strokeCircle(0, 0, 21 + pulse * 3);
+    }
   }
 
   drawPathPreview(path) {
@@ -903,6 +938,14 @@ class WorldScene extends Phaser.Scene {
     this._mmW=mw; this._mmH=mh;
     this.drawMinimap();
 
+    // Screen vignette (dark edges) — depth below HUD, above terrain
+    this._vignette = this.add.graphics().setScrollFactor(0).setDepth(195);
+    this._drawVignette(w, h);
+
+    // Faction colour strip along the bottom of the HUD bar
+    this.hudFactionStrip = this.add.graphics().setScrollFactor(0).setDepth(202);
+    this._drawFactionStrip(w);
+
     this.scale.on('resize', (gameSize)=>this.onResize(gameSize.width,gameSize.height), this);
   }
 
@@ -933,6 +976,8 @@ class WorldScene extends Phaser.Scene {
     this.minimapBorderGfx.lineStyle(2,THEME.minimap.frame,1.0); this.minimapBorderGfx.strokeRect(mx-1,my-1,mw+2,mh+2);
     this.minimapBorderGfx.lineStyle(1,THEME.minimap.frameInner,0.85); this.minimapBorderGfx.strokeRect(mx+1,my+1,mw-2,mh-2);
     this.drawMinimap();
+    this._drawVignette(w, h);
+    this._drawFactionStrip(w);
     this._notifications.forEach((n,i)=>{ n.obj.setPosition(w/2, THEME.hud.height+20+i*32); });
   }
 
@@ -1029,6 +1074,10 @@ class WorldScene extends Phaser.Scene {
   update(time, delta) {
     this.updateHUD();
     this._tickNotifications(delta/1000);
+
+    // Animate player aura every frame regardless of pause state
+    this._animT += delta / 1000;
+    this._drawPlayerAura();
 
     // Keep tooltip position synced to moving NPC
     if (this._hoveredNpc && this._tooltipObjs.length) {
@@ -1900,6 +1949,53 @@ class WorldScene extends Phaser.Scene {
     });
     objs.push(d);
     this.activePanel=objs;
+  }
+
+  // ---- Visual helpers ----
+
+  /** Soft faction-coloured blobs showing political territory on the map */
+  drawFactionTerritories() {
+    const rt = this.add.renderTexture(0, 0, MAP_W, MAP_H).setOrigin(0).setDepth(2);
+    const g  = this.make.graphics({add: false});
+    // Draw smallest tier first so capitals paint on top
+    const sorted = [...this.towns].sort((a,b) => a.tier - b.tier);
+    sorted.forEach(t => {
+      const fc = THEME.faction[t.faction] || 0x888888;
+      const px = t.x * TILE + TILE/2, py = t.y * TILE + TILE/2;
+      if (t.tier === 2) {
+        g.fillStyle(fc, 0.07); g.fillCircle(px, py, 340);
+        g.fillStyle(fc, 0.05); g.fillCircle(px, py, 200);
+      } else if (t.type !== 'village') {
+        g.fillStyle(fc, 0.06); g.fillCircle(px, py, 210);
+        g.fillStyle(fc, 0.04); g.fillCircle(px, py, 120);
+      } else {
+        g.fillStyle(fc, 0.04); g.fillCircle(px, py, 100);
+      }
+    });
+    rt.draw(g); g.destroy();
+  }
+
+  /** Screen-edge vignette — darkens corners for a cinematic look */
+  _drawVignette(w, h) {
+    const g = this._vignette; g.clear();
+    const steps = 12;
+    for (let i = 0; i < steps; i++) {
+      const pad = (steps - i) * 24;
+      const a   = Math.pow((steps - i) / steps, 2) * 0.30;
+      g.fillStyle(0x000000, a);
+      g.fillRect(0,     0,     w, pad);       // top
+      g.fillRect(0,     h-pad, w, pad);       // bottom
+      g.fillRect(0,     0,     pad, h);       // left
+      g.fillRect(w-pad, 0,     pad, h);       // right
+    }
+  }
+
+  /** Thin faction-coloured bar along the bottom edge of the HUD strip */
+  _drawFactionStrip(w) {
+    const g = this.hudFactionStrip; if (!g) return; g.clear();
+    const fc = THEME.faction[player.faction] || 0x6688aa;
+    g.fillStyle(fc, 0.55);
+    g.fillRect(0, THEME.hud.height - 2, w, 2);
   }
 
   showLevelUpPanel() {

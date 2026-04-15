@@ -58,9 +58,16 @@ function drawPanelBg(scene, cx, cy, w, h) {
   g.lineStyle(1, THEME.panel.borderBright, 0.25);
   g.strokeRoundedRect(cx - w/2 + 1, cy - h/2 + 1, w - 2, h - 2, THEME.panel.radius);
 
+  // Header area tint — subtle highlight behind title
+  g.fillStyle(THEME.panel.borderBright, 0.06);
+  g.fillRoundedRect(cx - w/2 + 2, cy - h/2 + 2, w - 4, 36,
+    { tl: THEME.panel.radius, tr: THEME.panel.radius, bl: 0, br: 0 });
+
   // Title bar separator
-  g.lineStyle(1, THEME.panel.border, 0.5);
-  g.lineBetween(cx - w/2 + 10, cy - h/2 + 36, cx + w/2 - 10, cy - h/2 + 36);
+  g.lineStyle(1, THEME.panel.borderBright, 0.35);
+  g.lineBetween(cx - w/2 + 10, cy - h/2 + 38, cx + w/2 - 10, cy - h/2 + 38);
+  g.lineStyle(1, THEME.panel.border, 0.4);
+  g.lineBetween(cx - w/2 + 10, cy - h/2 + 39, cx + w/2 - 10, cy - h/2 + 39);
 
   return g;
 }
