@@ -113,6 +113,7 @@ class WorldScene extends Phaser.Scene {
     this.costGrid    = new Float32Array(GRID_W * GRID_H);
     this.generateTerrain();
     this.loadSettlements();
+    this._initSettlementNPCs();
     this.ensureSettlementsPassable();
     this.renderTerrain();
     this.renderTerrainOverlays();
@@ -1335,6 +1336,11 @@ class WorldScene extends Phaser.Scene {
       player.gold   += r.loot;
       player.xp     += r.dLoss * 2;
       player.renown += Math.max(1, Math.round(r.dLoss/2));
+      // Track bandit kills for hunt quests
+      if (npc.type === 'bandit') {
+        player.banditsKilled = (player.banditsKilled || 0) + r.dLoss;
+        this._tickHuntQuests();
+      }
       player.troops.forEach(t => {
         if (TROOP_UPGRADES[t.id]) {
           player.troopXP[t.id] = (player.troopXP[t.id]||0) + Math.max(1, Math.round(r.dLoss/Math.max(1,t.count)));
@@ -1741,9 +1747,461 @@ class WorldScene extends Phaser.Scene {
     this.showSettlementMenu(sett);
   }
 
+  // ============================================================
+  // STATIC NPC + QUEST SYSTEM
+  // ============================================================
+
+  /** Assign a fixed roster of named NPCs to every settlement. */
+  _initSettlementNPCs() {
+    this.towns.forEach(sett => {
+      const typeKey = sett.tier >= 2 ? 'city' : (sett.type || 'town');
+      const roles   = NPC_ROLES_BY_TYPE[typeKey] || NPC_ROLES_BY_TYPE.town;
+      // Pick unique names for this settlement
+      const shuffled = [...NPC_NAMES].sort(() => Math.random()-0.5);
+      sett.npcs = roles.map((role, i) => ({
+        id:        `${sett.id}_npc${i}`,
+        name:      shuffled[i] || `Citizen ${i+1}`,
+        role,
+        color:     ROLE_COLORS[role] || THEME.text.primary,
+        dialogues: ROLE_DIALOGUES[role] || ['Greetings, traveller.'],
+      }));
+    });
+  }
+
+  /** Generate a quest object for an NPC, or null if ineligible. */
+  _generateQuestForNPC(npcDef, sett) {
+    if (!QUEST_GIVER_ROLES.has(npcDef.role)) return null;
+    if (player.quests.filter(q => !q.completed && !q.failed).length >= 3) return null;
+    if (player.quests.find(q => q.giverId === npcDef.id && !q.completed && !q.failed)) return null;
+
+    const role = npcDef.role;
+    let type;
+    if (role === 'Guard Captain' || role === 'Constable') {
+      type = 'hunt';
+    } else if (role === 'Merchant' || role === 'Guild Master') {
+      type = Math.random() < 0.6 ? 'delivery' : 'errand';
+    } else if (role === 'Elder' || role === 'Innkeeper') {
+      type = Math.random() < 0.5 ? 'delivery' : 'errand';
+    } else {
+      type = Math.random() < 0.4 ? 'hunt' : 'delivery';
+    }
+
+    const id = `q_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
+
+    if (type === 'hunt') {
+      const amount = randInt(5, 15);
+      return {
+        id, type,
+        title:      `Slay ${amount} Bandits`,
+        desc:       `${npcDef.name} needs the roads cleared. Kill ${amount} bandits and return for your reward.`,
+        giverId:    npcDef.id,
+        giverName:  npcDef.name,
+        giverSettId:sett.id,
+        giverSettName: sett.name,
+        reward:     amount * randInt(18, 30),
+        renown:     Math.ceil(amount / 2),
+        amount,
+        startKills: player.banditsKilled || 0,
+        completed:  false,
+        failed:     false,
+      };
+    }
+
+    if (type === 'delivery') {
+      const others = this.towns.filter(t => t.id !== sett.id && t.type !== 'village');
+      if (!others.length) return null;
+      const dest = randPick(others);
+      const good = randPick(GOODS);
+      const amount = randInt(3, 8);
+      return {
+        id, type,
+        title:      `Deliver ${amount} ${good} to ${dest.name}`,
+        desc:       `${npcDef.name} needs ${amount} units of ${good} delivered to ${dest.name}. The goods must be in your inventory when you arrive.`,
+        giverId:    npcDef.id,
+        giverName:  npcDef.name,
+        giverSettId:sett.id,
+        giverSettName: sett.name,
+        reward:     amount * randInt(14, 25),
+        renown:     randInt(1, 3),
+        good, amount,
+        destSettId: dest.id,
+        destSettName: dest.name,
+        completed:  false,
+        failed:     false,
+      };
+    }
+
+    if (type === 'errand') {
+      const others = this.towns.filter(t => t.id !== sett.id);
+      if (!others.length) return null;
+      const dest = randPick(others);
+      if (!dest.npcs || !dest.npcs.length) return null;
+      const targetNpc = randPick(dest.npcs);
+      return {
+        id, type,
+        title:      `Deliver a Message to ${targetNpc.name} in ${dest.name}`,
+        desc:       `${npcDef.name} needs a message brought to ${targetNpc.name} (${targetNpc.role}) in ${dest.name}. Find them and speak with them.`,
+        giverId:    npcDef.id,
+        giverName:  npcDef.name,
+        giverSettId:sett.id,
+        giverSettName: sett.name,
+        reward:     randInt(80, 180),
+        renown:     randInt(1, 4),
+        destSettId: dest.id,
+        destSettName: dest.name,
+        targetNpcId: targetNpc.id,
+        targetNpcName: targetNpc.name,
+        completed:  false,
+        failed:     false,
+      };
+    }
+
+    return null;
+  }
+
+  /** Called after each bandit kill — auto-completes finished hunt quests. */
+  _tickHuntQuests() {
+    player.quests.forEach(q => {
+      if (q.type !== 'hunt' || q.completed || q.failed) return;
+      const progress = (player.banditsKilled || 0) - q.startKills;
+      if (progress >= q.amount) {
+        q.completed = true;
+        player.gold   += q.reward;
+        player.renown += q.renown || 0;
+        this._worldLog(`Quest complete: "${q.title}" — +${q.reward}g`);
+        this.showNotification(`Quest complete: ${q.title}!`);
+      }
+    });
+  }
+
+  /**
+   * Check delivery/errand quest completions on arrival at a settlement.
+   * Injects completion notices inline into the settlement menu panel.
+   */
+  _checkQuestCompletion(sett, container, tl, gy) {
+    let anyCompleted = false;
+    player.quests.forEach(q => {
+      if (q.completed || q.failed) return;
+      if (q.type === 'delivery' && q.destSettId === sett.id) {
+        if ((player.inventory[q.good] || 0) >= q.amount) {
+          q.completed = true;
+          player.inventory[q.good] -= q.amount;
+          player.gold   += q.reward;
+          player.renown += q.renown || 0;
+          this._worldLog(`Quest complete: "${q.title}" — +${q.reward}g`);
+          if (!anyCompleted) {
+            container.add(this.add.text(tl, gy,
+              `✓ Quest complete: "${q.title}" +${q.reward}g`,
+              {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.green}
+            ));
+            anyCompleted = true;
+          }
+        }
+      }
+    });
+  }
+
+  // ---- People Panel ----
+  showPeoplePanel(sett) {
+    this.closePanel();
+    const npcs = sett.npcs || [];
+    const rowH = 52, pw = 460, ph = Math.min(520, 90 + npcs.length * rowH + 50);
+    const {objs, cx, cy} = this.panelBg(pw, ph);
+    const d = this.add.container(0,0).setScrollFactor(0).setDepth(301);
+    const tl = cx-pw/2+24, top = cy-ph/2;
+
+    d.add(this.add.text(tl, top+14, `People of ${sett.name}`,
+      {fontSize:THEME.font.lg, fontFamily:THEME.font.ui, color:THEME.text.gold, fontStyle:'bold'}));
+
+    let gy = top + 48;
+    npcs.forEach(npc => {
+      // NPC row background
+      const rowBg = this.add.graphics().setScrollFactor(0).setDepth(301);
+      rowBg.fillStyle(0x0d1a2a, 0.7); rowBg.fillRoundedRect(tl-4, gy-4, pw-36, rowH-6, 4);
+      objs.push(rowBg);
+
+      // Portrait circle
+      const portG = this.add.graphics().setScrollFactor(0).setDepth(302);
+      const portColor = parseInt((npc.color||'#888888').replace('#',''), 16);
+      portG.fillStyle(portColor, 0.85); portG.fillCircle(tl+18, gy+18, 16);
+      portG.lineStyle(2, 0xffffff, 0.2); portG.strokeCircle(tl+18, gy+18, 16);
+      objs.push(portG);
+      // Initials
+      d.add(this.add.text(tl+18, gy+18,
+        npc.name.slice(0,1),
+        {fontSize:'14px', fontFamily:THEME.font.ui, color:'#ffffff', fontStyle:'bold'}).setOrigin(0.5,0.5));
+
+      // Name + role
+      d.add(this.add.text(tl+42, gy+4, npc.name,
+        {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary, fontStyle:'bold'}));
+      d.add(this.add.text(tl+42, gy+20, npc.role,
+        {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:npc.color||THEME.text.muted}));
+
+      // Quest indicator
+      const activeQ = player.quests.find(q => q.giverId === npc.id && !q.completed && !q.failed);
+      const canOffer = QUEST_GIVER_ROLES.has(npc.role) &&
+                       !activeQ &&
+                       player.quests.filter(q=>!q.completed&&!q.failed).length < 3;
+      if (activeQ) {
+        d.add(this.add.text(tl+42, gy+34, `Quest: ${activeQ.title}`,
+          {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.gold}));
+      } else if (canOffer) {
+        d.add(this.add.text(tl+42, gy+34, '! Has a quest for you',
+          {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:'#ffdd44'}));
+      }
+
+      // Talk button
+      d.add(createStyledButton(this, cx+pw/2-70, gy+18, 'Talk',
+        () => this.showNPCDialogue(npc, sett),
+        {depth:303, padX:10, padY:5}));
+
+      gy += rowH;
+    });
+
+    d.add(createStyledButton(this, cx, top+ph-28, '← Back',
+      () => this.showSettlementMenu(sett),
+      {depth:302, padX:16, padY:8}));
+
+    objs.push(d);
+    this.activePanel = objs;
+  }
+
+  // ---- NPC Dialogue Panel ----
+  showNPCDialogue(npcDef, sett) {
+    this.closePanel();
+
+    // Check errand quest completion (player talking to the right NPC)
+    player.quests.forEach(q => {
+      if (q.type === 'errand' && !q.completed && !q.failed &&
+          q.targetNpcId === npcDef.id && q.destSettId === sett.id) {
+        q.completed = true;
+        player.gold   += q.reward;
+        player.renown += q.renown || 0;
+        this._worldLog(`Quest complete: "${q.title}" — +${q.reward}g`);
+      }
+    });
+
+    const activeQ  = player.quests.find(q => q.giverId === npcDef.id && !q.completed && !q.failed);
+    const justDone = player.quests.find(q => q.giverId === npcDef.id && q.completed &&
+                                            q.type !== 'hunt'); // show thanks once
+
+    // Pick quest if NPC can offer one and hasn't yet
+    let pendingOffer = null;
+    if (!activeQ && !justDone) {
+      pendingOffer = this._generateQuestForNPC(npcDef, sett);
+    }
+
+    const pw = 480, ph = pendingOffer ? 400 : 310;
+    const {objs, cx, cy} = this.panelBg(pw, ph);
+    const d = this.add.container(0,0).setScrollFactor(0).setDepth(301);
+    const tl = cx-pw/2+24, top = cy-ph/2;
+
+    // Portrait
+    const portG = this.add.graphics().setScrollFactor(0).setDepth(302);
+    const portColor = parseInt((npcDef.color||'#888888').replace('#',''), 16);
+    portG.fillStyle(portColor, 0.9); portG.fillCircle(tl+28, top+42, 26);
+    portG.lineStyle(2, 0xffffff, 0.25); portG.strokeCircle(tl+28, top+42, 26);
+    objs.push(portG);
+    d.add(this.add.text(tl+28, top+42, npcDef.name.slice(0,1),
+      {fontSize:'18px', fontFamily:THEME.font.ui, color:'#ffffff', fontStyle:'bold'}).setOrigin(0.5,0.5));
+
+    // Name + role header
+    d.add(this.add.text(tl+66, top+26, npcDef.name,
+      {fontSize:THEME.font.lg, fontFamily:THEME.font.ui, color:THEME.text.gold, fontStyle:'bold'}));
+    d.add(this.add.text(tl+66, top+48, npcDef.role,
+      {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:npcDef.color||THEME.text.muted}));
+
+    // Divider
+    const divG = this.add.graphics().setScrollFactor(0).setDepth(302);
+    divG.lineStyle(1, THEME.panel.border, 0.4);
+    divG.lineBetween(tl, top+74, cx+pw/2-24, top+74);
+    objs.push(divG);
+
+    let gy = top + 86;
+
+    // Dialogue text
+    let dialogue;
+    if (justDone) {
+      dialogue = `"You have my thanks, ${player.faction} warrior. A deal well kept."`;
+    } else if (activeQ) {
+      const progress = activeQ.type === 'hunt'
+        ? Math.min(activeQ.amount, (player.banditsKilled||0) - activeQ.startKills)
+        : null;
+      dialogue = progress !== null
+        ? `"${progress}/${activeQ.amount} bandits dealt with so far. Keep going."`
+        : `"Have you completed the task? I'm still waiting."`;
+    } else {
+      dialogue = `"${randPick(npcDef.dialogues)}"`;
+    }
+
+    // Word-wrap dialogue manually (split at ~55 chars)
+    const words = dialogue.split(' ');
+    const lines = []; let cur = '';
+    words.forEach(w => {
+      if ((cur+' '+w).trim().length > 55) { lines.push(cur.trim()); cur = w; }
+      else cur = (cur+' '+w).trim();
+    });
+    if (cur) lines.push(cur);
+    lines.forEach(line => {
+      d.add(this.add.text(tl, gy, line,
+        {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary, fontStyle:'italic'}));
+      gy += 18;
+    });
+
+    gy += 10;
+
+    // Active quest progress
+    if (activeQ) {
+      const divQ = this.add.graphics().setScrollFactor(0).setDepth(302);
+      divQ.lineStyle(1, THEME.panel.border, 0.3);
+      divQ.lineBetween(tl, gy, cx+pw/2-24, gy);
+      objs.push(divQ);
+      gy += 10;
+      d.add(this.add.text(tl, gy, `Active quest: ${activeQ.title}`,
+        {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.gold, fontStyle:'bold'}));
+      gy += 18;
+      if (activeQ.type === 'hunt') {
+        const prog = Math.min(activeQ.amount, (player.banditsKilled||0) - activeQ.startKills);
+        d.add(this.add.text(tl, gy, `Progress: ${prog} / ${activeQ.amount} bandits`,
+          {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+        gy += 16;
+      } else if (activeQ.type === 'delivery') {
+        const have = player.inventory[activeQ.good] || 0;
+        d.add(this.add.text(tl, gy, `You carry: ${have}/${activeQ.amount} ${activeQ.good}  →  ${activeQ.destSettName}`,
+          {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+        gy += 16;
+      } else if (activeQ.type === 'errand') {
+        d.add(this.add.text(tl, gy, `Speak to ${activeQ.targetNpcName} in ${activeQ.destSettName}`,
+          {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+        gy += 16;
+      }
+      d.add(this.add.text(tl, gy, `Reward: ${activeQ.reward}g + ${activeQ.renown||0} renown`,
+        {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.gold}));
+      gy += 16;
+    }
+
+    // Quest offer
+    if (pendingOffer) {
+      const divQ = this.add.graphics().setScrollFactor(0).setDepth(302);
+      divQ.lineStyle(1, 0xddaa22, 0.5);
+      divQ.lineBetween(tl, gy, cx+pw/2-24, gy);
+      objs.push(divQ);
+      gy += 10;
+      d.add(this.add.text(tl, gy, `Quest: ${pendingOffer.title}`,
+        {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.gold, fontStyle:'bold'}));
+      gy += 18;
+      // Word-wrap description
+      const dwords = pendingOffer.desc.split(' ');
+      let dcur = ''; const dlines = [];
+      dwords.forEach(w => {
+        if ((dcur+' '+w).trim().length > 60) { dlines.push(dcur.trim()); dcur = w; }
+        else dcur = (dcur+' '+w).trim();
+      });
+      if (dcur) dlines.push(dcur);
+      dlines.forEach(line => {
+        d.add(this.add.text(tl, gy, line,
+          {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+        gy += 15;
+      });
+      gy += 4;
+      d.add(this.add.text(tl, gy, `Reward: ${pendingOffer.reward}g + ${pendingOffer.renown||0} renown`,
+        {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.gold}));
+      gy += 18;
+
+      // Accept / Decline buttons
+      d.add(createStyledButton(this, tl+10, gy, 'Accept Quest', () => {
+        player.quests.push(pendingOffer);
+        this.showNotification(`Quest accepted: ${pendingOffer.title}`);
+        this.showNPCDialogue(npcDef, sett);
+      }, {depth:303, padX:12, padY:7}));
+      d.add(createStyledButton(this, tl+150, gy, 'Decline', () => {
+        this.showNPCDialogue(npcDef, sett);
+      }, {depth:303, padX:12, padY:7}));
+    }
+
+    d.add(createStyledButton(this, cx, top+ph-28, '← Back',
+      () => this.showPeoplePanel(sett),
+      {depth:302, padX:16, padY:8}));
+
+    objs.push(d);
+    this.activePanel = objs;
+  }
+
+  // ---- Quest Log Panel ----
+  showQuestLog(sett) {
+    this.closePanel();
+    const active   = player.quests.filter(q => !q.completed && !q.failed);
+    const done     = player.quests.filter(q => q.completed || q.failed);
+    const rowH     = 68;
+    const ph       = Math.min(540, 80 + Math.max(1, active.length) * rowH + (done.length ? 30 : 0) + 50);
+    const pw       = 480;
+    const {objs, cx, cy} = this.panelBg(pw, ph);
+    const d = this.add.container(0,0).setScrollFactor(0).setDepth(301);
+    const tl = cx-pw/2+24, top = cy-ph/2;
+
+    d.add(this.add.text(tl, top+14, 'Quest Log',
+      {fontSize:THEME.font.lg, fontFamily:THEME.font.ui, color:THEME.text.gold, fontStyle:'bold'}));
+    d.add(this.add.text(cx+pw/2-30, top+18,
+      `${active.length}/3`,
+      {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.muted}).setOrigin(1, 0));
+
+    let gy = top + 46;
+
+    if (!active.length) {
+      d.add(this.add.text(tl, gy, 'No active quests. Speak to townsfolk.',
+        {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+      gy += 24;
+    }
+
+    active.forEach(q => {
+      const bg = this.add.graphics().setScrollFactor(0).setDepth(301);
+      bg.fillStyle(0x0d1a2a, 0.7); bg.fillRoundedRect(tl-4, gy-4, pw-36, rowH-6, 4);
+      objs.push(bg);
+
+      const typeIcon = q.type==='hunt' ? '⚔' : q.type==='delivery' ? '📦' : '✉';
+      d.add(this.add.text(tl+2, gy+2, typeIcon,
+        {fontSize:'16px', fontFamily:THEME.font.ui, color:THEME.text.gold}));
+      d.add(this.add.text(tl+24, gy+2, q.title,
+        {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary, fontStyle:'bold'}));
+      d.add(this.add.text(tl+24, gy+20, `From: ${q.giverName} (${q.giverSettName})`,
+        {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+
+      // Progress line
+      let progStr = '';
+      if (q.type === 'hunt') {
+        const p = Math.min(q.amount, (player.banditsKilled||0) - q.startKills);
+        progStr = `Kill bandits: ${p}/${q.amount}`;
+      } else if (q.type === 'delivery') {
+        const have = player.inventory[q.good]||0;
+        progStr = `Carry ${q.good}: ${have}/${q.amount}  →  ${q.destSettName}`;
+      } else if (q.type === 'errand') {
+        progStr = `Find ${q.targetNpcName} in ${q.destSettName}`;
+      }
+      d.add(this.add.text(tl+24, gy+36, progStr,
+        {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+      d.add(this.add.text(tl+24, gy+50, `Reward: ${q.reward}g + ${q.renown||0} renown`,
+        {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.gold}));
+
+      gy += rowH;
+    });
+
+    if (done.length) {
+      d.add(this.add.text(tl, gy+6, `Completed / Failed: ${done.length}`,
+        {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+      gy += 24;
+    }
+
+    d.add(createStyledButton(this, cx, top+ph-28, sett ? '← Back' : 'Close',
+      () => sett ? this.showSettlementMenu(sett) : (this.closePanel(), this.paused=false),
+      {depth:302, padX:16, padY:8}));
+
+    objs.push(d);
+    this.activePanel = objs;
+  }
+
   showSettlementMenu(sett) {
     this.closePanel();
-    const pw=440, ph=320;
+    const pw=440, ph=370;
     const {objs,cx,cy} = this.panelBg(pw,ph);
     const d = this.add.container(0,0).setScrollFactor(0).setDepth(301);
     const tl=cx-pw/2+24, top=cy-ph/2;
@@ -1765,13 +2223,21 @@ class WorldScene extends Phaser.Scene {
     if (sett.type==='village' && sett.boundTown)
       d.add(this.add.text(tl, sy+18, `Produces: ${(sett.production||[]).join(', ')||'—'}   Supplies: ${sett.boundTown.name}`, {fontSize:THEME.font.xs,fontFamily:THEME.font.ui,color:THEME.text.muted}));
 
-    // Action buttons
-    const btnY = top+ph-68, gap=12;
+    // Active quests in this settlement
+    this._checkQuestCompletion(sett, d, tl, sy+36);
+
+    // Action buttons — row 1
+    const btnY = top+ph-102, gap=10;
     let bx=tl;
-    d.add(createStyledButton(this,bx,btnY,'Trade',       ()=>this.showTradePanel(sett),   {depth:302,padX:14,padY:8})); bx+=90+gap;
-    d.add(createStyledButton(this,bx,btnY,'Recruit',     ()=>this.showRecruitPanel(sett), {depth:302,padX:14,padY:8})); bx+=90+gap;
-    d.add(createStyledButton(this,bx,btnY,'Stay',        ()=>this.beginStay(sett),        {depth:302,padX:14,padY:8})); bx+=90+gap;
-    d.add(createStyledButton(this,bx,btnY,'Leave',       ()=>this.leaveSettlement(),      {depth:302,padX:14,padY:8}));
+    d.add(createStyledButton(this,bx,btnY,'Trade',   ()=>this.showTradePanel(sett),   {depth:302,padX:12,padY:7})); bx+=88+gap;
+    d.add(createStyledButton(this,bx,btnY,'Recruit', ()=>this.showRecruitPanel(sett), {depth:302,padX:12,padY:7})); bx+=88+gap;
+    d.add(createStyledButton(this,bx,btnY,'Stay',    ()=>this.beginStay(sett),        {depth:302,padX:12,padY:7})); bx+=88+gap;
+    d.add(createStyledButton(this,bx,btnY,'Leave',   ()=>this.leaveSettlement(),      {depth:302,padX:12,padY:7}));
+
+    // Action buttons — row 2
+    const btnY2 = btnY+38; bx=tl;
+    d.add(createStyledButton(this,bx,btnY2,'People', ()=>this.showPeoplePanel(sett),  {depth:302,padX:12,padY:7})); bx+=88+gap;
+    d.add(createStyledButton(this,bx,btnY2,'Quests', ()=>this.showQuestLog(sett),     {depth:302,padX:12,padY:7}));
 
     objs.push(d);
     this.activePanel = objs;
