@@ -180,3 +180,36 @@ function autoResolveWithLeader(atk, def) {
   def.troops = applyLoss(def.troops, dt*dLR);
   return { win, aLoss:Math.round(at*aLR), dLoss:Math.round(dt*dLR), loot:win?Math.round(dt*dLR*5*Math.random()):0 };
 }
+
+// ---- Dynamic market pricing ----
+
+/**
+ * Compute the buy price for a good at a settlement.
+ * Price rises as stock falls (inverse sqrt), and with prosperity.
+ * Daily noise (±12%) stored on town._mNoise[good].
+ */
+function calcBuyPrice(town, good) {
+  const mb = MARKET_BASE[good];
+  if (!mb) return 10;
+  const stock   = Math.max(1, town.goods[good] || 0);
+  const supply  = Math.max(0.35, Math.sqrt(15 / stock));       // low stock → high multiplier
+  const wealth  = 0.75 + (town.prosperity || 50) * 0.005;     // rich towns charge more
+  const noise   = 1 + ((town._mNoise && town._mNoise[good]) || 0);
+  return clamp(Math.round(mb.base * supply * wealth * noise), mb.min, mb.max);
+}
+
+/** Sell price = 60% of buy price, boosted slightly by player trading skill. */
+function calcSellPrice(town, good) {
+  const bonus = player ? (1 + (player.skills?.trading || 0) * 0.04) : 1;
+  return Math.max(1, Math.round(calcBuyPrice(town, good) * 0.60 * bonus));
+}
+
+/** Returns '↑' (price rising), '↓' (price falling), or '→' (stable). */
+function pricetrend(town, good) {
+  const prev = town._prevGoods && town._prevGoods[good];
+  if (prev === undefined) return '→';
+  const cur = town.goods[good] || 0;
+  if (prev > cur + 2) return '↑';   // stock fell → price went up
+  if (prev < cur - 2) return '↓';   // stock rose → price went down
+  return '→';
+}

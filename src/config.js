@@ -137,6 +137,16 @@ function factionsAtWar(f1, f2) {
   return (FACTION_RELATIONS[f1]?.[f2] ?? 'war') === 'war';
 }
 
+// --- Market base prices per good ---
+// base = "normal" price at stock ~15 and prosperity 50
+// min/max = hard price floor/ceiling
+const MARKET_BASE = {
+  grain: { base: 14, min: 4,   max: 55  },
+  iron:  { base: 32, min: 12,  max: 110 },
+  cloth: { base: 22, min: 8,   max: 85  },
+  fish:  { base: 11, min: 3,   max: 42  },
+};
+
 // --- Troop upgrade paths ---
 // Maps source troop id → { to: target id, xp: xp required, cost: gold cost }
 const TROOP_UPGRADES = {

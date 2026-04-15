@@ -1194,7 +1194,7 @@ class WorldScene extends Phaser.Scene {
 
   // ---- ENCOUNTER PANEL ----
   showEncounterPanel(npc) {
-    const hostile  = npc.faction === 'Bandit' || npc.type === 'bandit';
+    const hostile  = this.isHostile(npc);
     const pw = 520, ph = 420;
     const {objs, cx, cy} = this.panelBg(pw, ph);
     const d   = this.add.container(0,0).setScrollFactor(0).setDepth(301);
@@ -1323,6 +1323,7 @@ class WorldScene extends Phaser.Scene {
 
   // ---- Execute Fight ----
   executeFight(npc) {
+    const playerBefore = player.troops.map(t=>({...t}));
     const atkParty = { troops: player.troops.map(t=>({...t})), skills: player.skills };
     const defParty = { troops: npc.troops.map(t=>({...t})), lordDef: npc.lordDef };
     const r = autoResolveWithLeader(atkParty, defParty);
@@ -1334,7 +1335,6 @@ class WorldScene extends Phaser.Scene {
       player.gold   += r.loot;
       player.xp     += r.dLoss * 2;
       player.renown += Math.max(1, Math.round(r.dLoss/2));
-      // Grant XP to surviving troops (they fought)
       player.troops.forEach(t => {
         if (TROOP_UPGRADES[t.id]) {
           player.troopXP[t.id] = (player.troopXP[t.id]||0) + Math.max(1, Math.round(r.dLoss/Math.max(1,t.count)));
@@ -1343,7 +1343,7 @@ class WorldScene extends Phaser.Scene {
       npc.alive       = false;
       npc.respawnTimer= 25;
       this.drawNPC(npc);
-      this.showBattleResultPanel(true, r, npc);
+      this.showBattleResultPanel(true, r, npc, playerBefore);
     } else {
       player.gold = Math.max(0, player.gold - 50);
       const near = this.towns.reduce((b,t) =>
@@ -1353,7 +1353,7 @@ class WorldScene extends Phaser.Scene {
       this.playerPos.y = near.y*TILE+TILE/2;
       this.playerPath = []; this.pathGfx.clear(); this.drawPlayer();
       this.camTarget.x = this.playerPos.x; this.camTarget.y = this.playerPos.y;
-      this.showBattleResultPanel(false, r, npc);
+      this.showBattleResultPanel(false, r, npc, playerBefore);
     }
     this.checkLevelUp();
   }
@@ -1394,39 +1394,123 @@ class WorldScene extends Phaser.Scene {
   }
 
   // ---- Battle Result Panel ----
-  showBattleResultPanel(win, r, npc) {
-    const pw = 420, ph = 300;
+  showBattleResultPanel(win, r, npc, playerBefore) {
+    // Camera effects — fire immediately before showing the panel
+    if (win) {
+      this.cameras.main.flash(500, 60, 180, 60, true);
+    } else {
+      this.cameras.main.shake(600, 0.018);
+      this.cameras.main.flash(400, 160, 20, 20, true);
+    }
+
+    const enemy = npc.lordDef ? npc.lordDef.name : (npc.name || 'Enemy');
+
+    // Build per-troop breakdown: compare playerBefore vs current player.troops
+    const troopRows = [];
+    (playerBefore || []).forEach(before => {
+      const def   = TROOP_BY_ID[before.id];
+      if (!def) return;
+      const after = player.troops.find(t => t.id === before.id);
+      const lost  = before.count - (after ? after.count : 0);
+      troopRows.push({ name: def.name, before: before.count, after: after ? after.count : 0, lost });
+    });
+
+    const rowH   = 22;
+    const extraH = Math.max(0, troopRows.length - 2) * rowH;
+    const pw = 460, ph = 360 + extraH;
     const {objs, cx, cy} = this.panelBg(pw, ph);
     const d  = this.add.container(0,0).setScrollFactor(0).setDepth(301);
     const tl = cx - pw/2 + 28, top = cy - ph/2;
 
-    const titleStr  = win ? '⚔  VICTORY!' : '💀  DEFEATED';
-    const titleCol  = win ? THEME.text.green : THEME.text.red;
-    d.add(this.add.text(cx, top+18, titleStr, {fontSize:THEME.font.xl, fontFamily:THEME.font.ui, color:titleCol, fontStyle:'bold', stroke:'#000', strokeThickness:3}).setOrigin(0.5,0));
+    // Title
+    const titleStr = win ? '⚔  VICTORY!' : '💀  DEFEATED';
+    const titleCol = win ? THEME.text.green : THEME.text.red;
+    d.add(this.add.text(cx, top+16, titleStr,
+      {fontSize:THEME.font.xl, fontFamily:THEME.font.ui, color:titleCol, fontStyle:'bold', stroke:'#000000', strokeThickness:4}
+    ).setOrigin(0.5, 0));
 
-    let gy = top + 58;
-    const enemy = npc.lordDef ? npc.lordDef.name : npc.name;
+    // Sub-header
+    const subStr = win ? `You defeated ${enemy}'s forces.` : `${enemy}'s forces crushed you.`;
+    d.add(this.add.text(cx, top+50, subStr,
+      {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.muted}
+    ).setOrigin(0.5, 0));
 
+    // Divider
+    const divG = this.add.graphics().setScrollFactor(0).setDepth(302);
+    divG.lineStyle(1, THEME.panel.border, 0.5);
+    divG.lineBetween(tl, top+74, cx+pw/2-28, top+74);
+    objs.push(divG);
+
+    // Stats block
+    let gy = top + 84;
+    const col2 = tl + 200;
+
+    d.add(this.add.text(tl,   gy, 'Enemy slain:',  {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+    d.add(this.add.text(col2, gy, `${r.dLoss}`,    {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:win ? THEME.text.green : THEME.text.primary}));
+    gy += 20;
+
+    d.add(this.add.text(tl,   gy, 'Your losses:',  {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+    d.add(this.add.text(col2, gy, `${r.aLoss}`,    {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color: r.aLoss > 0 ? THEME.text.red : THEME.text.green}));
+    gy += 20;
+
+    if (win && r.loot > 0) {
+      d.add(this.add.text(tl,   gy, 'Gold looted:', {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+      d.add(this.add.text(col2, gy, `+${r.loot}g`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.gold}));
+      gy += 20;
+    }
+    if (!win) {
+      d.add(this.add.text(tl,   gy, 'Gold lost:',   {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+      d.add(this.add.text(col2, gy, '-50g',         {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.red}));
+      gy += 20;
+    }
     if (win) {
-      d.add(this.add.text(tl, gy, `You defeated ${enemy}'s forces.`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary})); gy+=20;
-      d.add(this.add.text(tl, gy, `Enemy slain:   ${r.dLoss}`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary})); gy+=18;
-      d.add(this.add.text(tl, gy, `Your losses:   ${r.aLoss}`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary})); gy+=18;
-      if (r.loot > 0) { d.add(this.add.text(tl, gy, `Gold looted:   ${r.loot}g`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.gold})); gy+=18; }
-      const xp = r.dLoss*2;
-      d.add(this.add.text(tl, gy, `XP gained:     ${xp}   Renown +${Math.max(1,Math.round(r.dLoss/2))}`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.gold}));
-    } else {
-      d.add(this.add.text(tl, gy, `${enemy}'s forces crushed you.`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.primary})); gy+=20;
-      d.add(this.add.text(tl, gy, `Your losses:   ${r.aLoss}`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.red})); gy+=18;
-      d.add(this.add.text(tl, gy, `Gold lost:     50g`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.red})); gy+=18;
-      d.add(this.add.text(tl, gy, `Retreated to nearest town.`, {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+      const xp = r.dLoss * 2;
+      const ren = Math.max(1, Math.round(r.dLoss/2));
+      d.add(this.add.text(tl,   gy, 'XP / Renown:', {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+      d.add(this.add.text(col2, gy, `+${xp} XP   +${ren} Renown`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.gold}));
+      gy += 20;
     }
 
-    // Remaining troops
-    gy = top + ph - 72;
-    const pTot = player.troops.reduce((s,t)=>s+t.count,0);
-    d.add(this.add.text(tl, gy, `Remaining troops: ${pTot}`, {fontSize:THEME.font.sm, fontFamily:THEME.font.ui, color:THEME.text.muted})); gy+=18;
+    // Per-troop breakdown with mini bars
+    if (troopRows.length > 0) {
+      gy += 6;
+      const divG2 = this.add.graphics().setScrollFactor(0).setDepth(302);
+      divG2.lineStyle(1, THEME.panel.border, 0.4);
+      divG2.lineBetween(tl, gy, cx+pw/2-28, gy);
+      objs.push(divG2);
+      gy += 8;
 
-    const contBtn = createStyledButton(this, cx, gy+8, 'Continue →', ()=>{
+      d.add(this.add.text(tl, gy, 'Your troops:', {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.muted}));
+      gy += 16;
+
+      const barW = 80, barH = 7;
+      troopRows.forEach(row => {
+        d.add(this.add.text(tl, gy, row.name, {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color:THEME.text.primary}));
+
+        // Bar background
+        const bg = this.add.graphics().setScrollFactor(0).setDepth(302);
+        bg.fillStyle(0x1a2a3a, 1);
+        bg.fillRect(tl+120, gy+1, barW, barH);
+        // Before bar (grey)
+        bg.fillStyle(0x445566, 1);
+        bg.fillRect(tl+120, gy+1, barW, barH);
+        // After bar (green or red)
+        const frac = row.before > 0 ? row.after / row.before : 0;
+        const col  = frac > 0.6 ? 0x44aa44 : frac > 0.3 ? 0xddaa22 : 0xcc3333;
+        bg.fillStyle(col, 1);
+        bg.fillRect(tl+120, gy+1, Math.round(barW * frac), barH);
+        objs.push(bg);
+
+        const lostStr = row.lost > 0 ? ` -${row.lost}` : '';
+        d.add(this.add.text(tl+210, gy, `${row.after}/${row.before}${lostStr}`,
+          {fontSize:THEME.font.xs, fontFamily:THEME.font.ui, color: row.lost > 0 ? THEME.text.red : THEME.text.green}));
+        gy += rowH;
+      });
+    }
+
+    // Continue button
+    gy = top + ph - 44;
+    const contBtn = createStyledButton(this, cx, gy, 'Continue →', ()=>{
       this.closePanel();
       this.paused = false;
       this.logTimer = 0;
@@ -1434,7 +1518,6 @@ class WorldScene extends Phaser.Scene {
         ? `⚔ VICTORY vs ${enemy}! Slain:${r.dLoss} Lost:${r.aLoss} Loot:${r.loot}g`
         : `💀 DEFEAT by ${enemy}! Lost:${r.aLoss}`;
     }, {depth:302, padX:20, padY:8});
-    contBtn.setOrigin(0.5, 0);
     d.add(contBtn);
 
     objs.push(d);
@@ -1549,6 +1632,15 @@ class WorldScene extends Phaser.Scene {
   }
 
   dailyTick() {
+    // Snapshot goods for price-trend arrows before anything changes
+    this.towns.forEach(t => { t._prevGoods = {...t.goods}; });
+
+    // Refresh market noise ±12% per good per town each day
+    this.towns.forEach(t => {
+      if (!t._mNoise) t._mNoise = {};
+      GOODS.forEach(g => { t._mNoise[g] = (Math.random() - 0.5) * 0.24; });
+    });
+
     // Player wages
     let wages=0;
     player.troops.forEach(t => {
@@ -1734,18 +1826,21 @@ class WorldScene extends Phaser.Scene {
 
     GOODS.forEach(good => {
       const stock    = sett.goods[good] || 0;
-      const buyPrice = this._marketPrice(sett, good);
-      const sellPrice= Math.max(1, Math.round(buyPrice * 0.62));
+      const buyPrice = calcBuyPrice(sett, good);
+      const sellPrice= calcSellPrice(sett, good);
+      const trend    = pricetrend(sett, good);
       const invQty   = player.inventory[good] || 0;
       const isProd   = (sett.production||[]).includes(good);
       const stockColor = stock < 5 ? THEME.text.red : stock > 30 ? THEME.text.green : THEME.text.primary;
+      const trendColor = trend === '↑' ? THEME.text.red : trend === '↓' ? THEME.text.green : THEME.text.muted;
       const goodLabel  = isProd ? `★ ${good}` : good;
 
-      d.add(this.add.text(colGood,  gy, goodLabel,        {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:isProd?THEME.text.gold:THEME.text.primary}));
-      d.add(this.add.text(colStock, gy, `${stock}`,        {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:stockColor}));
-      d.add(this.add.text(colBuy,   gy, `${buyPrice}g`,    {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
-      d.add(this.add.text(colSell,  gy, `${sellPrice}g`,   {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted}));
-      d.add(this.add.text(colInv,   gy, `${invQty}`,        {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:invQty>0?THEME.text.gold:THEME.text.muted}));
+      d.add(this.add.text(colGood,  gy, goodLabel,                 {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:isProd?THEME.text.gold:THEME.text.primary}));
+      d.add(this.add.text(colStock, gy, `${stock}`,                {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:stockColor}));
+      d.add(this.add.text(colBuy,   gy, `${buyPrice}g`,            {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.primary}));
+      d.add(this.add.text(colBuy+38,gy, trend,                     {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:trendColor}));
+      d.add(this.add.text(colSell,  gy, `${sellPrice}g`,           {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:THEME.text.muted}));
+      d.add(this.add.text(colInv,   gy, `${invQty}`,               {fontSize:THEME.font.sm,fontFamily:THEME.font.ui,color:invQty>0?THEME.text.gold:THEME.text.muted}));
 
       // Buy button
       d.add(createStyledButton(this, colBuy+36, gy-2, '+1', ()=>{
